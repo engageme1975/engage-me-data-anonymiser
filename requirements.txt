@@ -1,0 +1,6 @@
+presidio-analyzer==2.2.363
+presidio-anonymizer==2.2.363
+spacy==3.7.5
+pandas>=2.0
+openpyxl
+streamlit>=1.30
