@@ -1,5 +1,5 @@
 param(
-    [string]$Python = "py -3",
+    [string]$Python = "python",
     [string]$OutputName = "Engage-Me-Data-Anonymiser"
 )
 
