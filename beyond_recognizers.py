@@ -78,6 +78,19 @@ UK_LANDLINE_PATTERN = r"\b(?:(?:\+44[\s\-]?|0)\d{2,4}[\s\-]?\d{3,4}[\s\-]?\d{3,4
 # catches the whole value up to end of line as a high-confidence fallback.
 NAME_LABEL_PATTERN = r"(?<=Name: )[^\r\n]+"
 
+# UK title + name, used in free-flowing complaint prose (e.g. "Miss Cole
+# received a letter", "Mr & Mrs Judge of 8 Waterlow Road"). spaCy's NER
+# inconsistently detects these short informal mentions, and in at least one
+# case ("Munday") mistakes the surname for a misspelled day-of-week and
+# tags it DATE_TIME instead of PERSON. Whitespace is restricted to spaces/
+# tabs (not newlines) so it can't span into an unrelated capitalised word
+# on the next line, such as an "Address:" or "Importance:" field label.
+TITLE_NAME_PATTERN = (
+    r"\b(?:Mr|Mrs|Miss|Ms|Mx)\.?[ \t]+"
+    r"(?:&[ \t]+(?:Mr|Mrs|Miss|Ms|Mx)\.?[ \t]+)?"
+    r"[A-Z][a-zA-Z'’-]*(?:[ \t]+[A-Z][a-zA-Z'’-]*){0,2}"
+)
+
 
 def create_beyond_analyzer(score_threshold: float = 0.4) -> AnalyzerEngine:
     """
@@ -190,6 +203,13 @@ def create_beyond_analyzer(score_threshold: float = 0.4) -> AnalyzerEngine:
         global_regex_flags=re.IGNORECASE,
     )
 
+    title_name_recognizer = PatternRecognizer(
+        supported_entity="PERSON",
+        name="Beyond Title + Name",
+        patterns=[Pattern("Title name", TITLE_NAME_PATTERN, 0.75)],
+        supported_language="en",
+    )
+
     # Register custom recognizers (they take priority)
     registry.add_recognizer(housing_ref)
     registry.add_recognizer(postcode_recognizer)
@@ -197,6 +217,7 @@ def create_beyond_analyzer(score_threshold: float = 0.4) -> AnalyzerEngine:
     registry.add_recognizer(phone_recognizer)
     registry.add_recognizer(access_code)
     registry.add_recognizer(name_label_recognizer)
+    registry.add_recognizer(title_name_recognizer)
 
     analyzer = AnalyzerEngine(
         registry=registry,
