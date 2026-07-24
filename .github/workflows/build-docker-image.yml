@@ -1,0 +1,40 @@
+name: Build Docker Image
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "app.py"
+      - "anonymization_core.py"
+      - "beyond_recognizers.py"
+      - "requirements.txt"
+      - "Dockerfile"
+      - ".github/workflows/build-docker-image.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            parthiv1911/engage-me-data-anonymiser:latest
+            parthiv1911/engage-me-data-anonymiser:${{ github.sha }}
