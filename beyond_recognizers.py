@@ -26,6 +26,18 @@ REDACTABLE_ENTITY_TYPES = {
     "ACCESS_CODE",
 }
 
+# Generic role/status words that spaCy's NER occasionally misclassifies as
+# PERSON in UK social-housing text. Passed to AnalyzerEngine.analyze() as an
+# allow_list so they're never redacted, regardless of which recognizer or
+# entity type flagged them.
+PERSON_FALSE_POSITIVE_ALLOW_LIST = [
+    "Landlord", "Landlords", "Landlady", "Landladies",
+    "Tenant", "Tenants", "Workman", "Workmen",
+    "Contractor", "Contractors", "Occupant", "Occupants",
+    "Resident", "Residents", "Neighbour", "Neighbours",
+    "Multiple", "Mutliple",
+]
+
 
 # ------------------------------------------------------------------
 # Research-backed patterns
@@ -60,6 +72,11 @@ UK_MOBILE_PATTERN = (
 
 # Flexible UK landline
 UK_LANDLINE_PATTERN = r"\b(?:(?:\+44[\s\-]?|0)\d{2,4}[\s\-]?\d{3,4}[\s\-]?\d{3,4}|0\d{9,10})\b"
+
+# Website-form "Name: <value>" field. spaCy's NER frequently misses titled
+# names with initials (e.g. "Mr R A Poile"), so this structural label match
+# catches the whole value up to end of line as a high-confidence fallback.
+NAME_LABEL_PATTERN = r"(?<=Name: )[^\r\n]+"
 
 
 def create_beyond_analyzer(score_threshold: float = 0.4) -> AnalyzerEngine:
@@ -164,12 +181,22 @@ def create_beyond_analyzer(score_threshold: float = 0.4) -> AnalyzerEngine:
         global_regex_flags=re.IGNORECASE,
     )
 
+    name_label_recognizer = PatternRecognizer(
+        supported_entity="PERSON",
+        name="Beyond Name Label Field",
+        patterns=[Pattern("Name: label", NAME_LABEL_PATTERN, 0.90)],
+        context=["name:"],
+        supported_language="en",
+        global_regex_flags=re.IGNORECASE,
+    )
+
     # Register custom recognizers (they take priority)
     registry.add_recognizer(housing_ref)
     registry.add_recognizer(postcode_recognizer)
     registry.add_recognizer(nino_recognizer)
     registry.add_recognizer(phone_recognizer)
     registry.add_recognizer(access_code)
+    registry.add_recognizer(name_label_recognizer)
 
     analyzer = AnalyzerEngine(
         registry=registry,

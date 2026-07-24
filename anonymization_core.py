@@ -7,7 +7,11 @@ import pandas as pd
 from presidio_anonymizer import AnonymizerEngine
 from presidio_anonymizer.entities import OperatorConfig
 
-from beyond_recognizers import create_beyond_analyzer, residual_scan
+from beyond_recognizers import (
+    create_beyond_analyzer,
+    residual_scan,
+    PERSON_FALSE_POSITIVE_ALLOW_LIST,
+)
 
 
 ENTITY_TYPE_OPTIONS = [
@@ -113,7 +117,11 @@ def process_dataframe(
         anonymised_texts = []
 
         for row_index, raw_text in enumerate(output_df[source_column].fillna("").astype(str)):
-            analysis = analyzer.analyze(text=raw_text, language="en")
+            analysis = analyzer.analyze(
+                text=raw_text,
+                language="en",
+                allow_list=PERSON_FALSE_POSITIVE_ALLOW_LIST,
+            )
             redaction_targets = [
                 result for result in analysis if result.entity_type in selected_entity_types
             ]
