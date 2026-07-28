@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-IMAGE="${IMAGE:-parthiv1911/engage-me-data-anonymiser:24h}"
+IMAGE="${IMAGE:-ghcr.io/engageme1975/engage-me-data-anonymiser:latest}"
 CONTAINER_NAME="${CONTAINER_NAME:-engage-me-data-anonymiser}"
 PORT="${PORT:-8501}"
 INSTALL_URL="https://www.docker.com/products/docker-desktop/"

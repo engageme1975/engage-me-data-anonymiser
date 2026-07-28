@@ -3,7 +3,7 @@ set -euo pipefail
 
 APP_NAME="Engage-Me Data Anonymiser"
 APP_ID="engage-me-data-anonymiser"
-IMAGE="${IMAGE:-parthiv1911/engage-me-data-anonymiser:24h}"
+IMAGE="${IMAGE:-ghcr.io/engageme1975/engage-me-data-anonymiser:latest}"
 PORT="${PORT:-8501}"
 INSTALL_DIR="${HOME}/.local/share/${APP_ID}"
 BIN_DIR="${HOME}/.local/bin"

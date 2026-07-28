@@ -24,8 +24,8 @@ Self-hosted PII anonymisation for housing comments using Microsoft Presidio. All
 If you prefer to run the container directly:
 
 ```bash
-docker pull ttl.sh/engage-me-data-anonymiser:24h
-docker run -p 8501:8501 ttl.sh/engage-me-data-anonymiser:24h
+docker pull ghcr.io/engageme1975/engage-me-data-anonymiser:latest
+docker run -p 8501:8501 ghcr.io/engageme1975/engage-me-data-anonymiser:latest
 ```
 
 5. Open your browser at http://localhost:8501
