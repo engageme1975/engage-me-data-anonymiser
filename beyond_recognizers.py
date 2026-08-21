@@ -228,10 +228,18 @@ def create_beyond_analyzer(score_threshold: float = 0.4) -> AnalyzerEngine:
     return analyzer
 
 
+# A match that is exactly a redaction tag (e.g. "<PERSON>", "<REDACTED>") is
+# something the anonymiser already handled, not a leftover. Patterns that
+# scan "the rest of the line" (NAME_LABEL_PATTERN) need this guard or every
+# successfully redacted "Name: <PERSON>" line would falsely flag itself.
+REDACTION_TAG_PATTERN = re.compile(r"^<[A-Z_]+>$")
+
+
 def residual_scan(text: str) -> List[Dict[str, Any]]:
     """
     Residual safety net after the main Presidio pass.
-    Flags possible leftover postcodes, phones, NINOs or long digit sequences.
+    Flags possible leftover postcodes, phones, NINOs, long digit sequences,
+    or person names (titled or in a "Name:" field) that survived redaction.
     """
     patterns = [
         (UK_POSTCODE_PATTERN, "POSSIBLE_UK_POSTCODE"),
@@ -239,15 +247,20 @@ def residual_scan(text: str) -> List[Dict[str, Any]]:
         (UK_LANDLINE_PATTERN, "POSSIBLE_UK_PHONE"),
         (UK_NINO_PATTERN, "POSSIBLE_NINO"),
         (r"\b\d{8,}\b", "LONG_DIGIT_SEQUENCE"),
+        (TITLE_NAME_PATTERN, "POSSIBLE_PERSON_TITLE"),
+        (NAME_LABEL_PATTERN, "POSSIBLE_NAME_LABEL"),
     ]
 
     findings = []
     for pattern, label in patterns:
         for match in re.finditer(pattern, text, re.IGNORECASE):
+            matched_text = match.group()
+            if REDACTION_TAG_PATTERN.match(matched_text.strip()):
+                continue
             findings.append({
                 "start": match.start(),
                 "end": match.end(),
-                "text": match.group(),
+                "text": matched_text,
                 "label": label,
             })
     return findings

@@ -91,6 +91,10 @@ def build_operators(selected_entity_types: Iterable[str], redaction_style: str) 
     return operators
 
 
+class AnonymisationCancelled(Exception):
+    """Raised to unwind process_dataframe when the caller requests cancellation."""
+
+
 def process_dataframe(
     df: pd.DataFrame,
     selected_columns: list[str],
@@ -98,6 +102,8 @@ def process_dataframe(
     redaction_style: str,
     score_threshold: float,
     progress_callback: Callable[[int, int, str], None] | None = None,
+    progress_interval: int = 25,
+    cancel_check: Callable[[], bool] | None = None,
 ) -> tuple[pd.DataFrame, list[dict], list[dict], dict[str, int | float]]:
     output_df = df.copy()
     analyzer = create_beyond_analyzer(score_threshold=score_threshold)
@@ -117,6 +123,9 @@ def process_dataframe(
         anonymised_texts = []
 
         for row_index, raw_text in enumerate(output_df[source_column].fillna("").astype(str)):
+            if cancel_check is not None and cancel_check():
+                raise AnonymisationCancelled("Anonymisation cancelled by user.")
+
             analysis = analyzer.analyze(
                 text=raw_text,
                 language="en",
@@ -160,7 +169,9 @@ def process_dataframe(
                 )
 
             processed_cells += 1
-            if progress_callback is not None:
+            if progress_callback is not None and (
+                processed_cells % progress_interval == 0 or processed_cells == total_cells
+            ):
                 status_message = f"Processed {processed_cells} of {total_cells} cells..."
                 progress_callback(processed_cells, total_cells, status_message)
 

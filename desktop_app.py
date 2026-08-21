@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import queue
+import threading
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -7,6 +9,7 @@ from tkinter import filedialog, messagebox, ttk
 import pandas as pd
 
 from anonymization_core import (
+    AnonymisationCancelled,
     DEFAULT_ENTITY_TYPES,
     ENTITY_TYPE_OPTIONS,
     default_selected_columns,
@@ -32,6 +35,9 @@ class DesktopAnonymiserApp:
         self.progress_var = tk.DoubleVar(value=0.0)
 
         self.dataframe = None
+        self.progress_queue: queue.Queue = queue.Queue()
+        self.cancel_event = threading.Event()
+        self.worker_thread: threading.Thread | None = None
 
         self._build_ui()
 
@@ -121,7 +127,12 @@ class DesktopAnonymiserApp:
 
         action_row = ttk.Frame(footer)
         action_row.grid(row=2, column=0, sticky="e", pady=(12, 0))
-        ttk.Button(action_row, text="Run anonymisation", command=self.run_anonymisation).grid(row=0, column=0)
+        self.cancel_button = ttk.Button(
+            action_row, text="Cancel", command=self.cancel_anonymisation, state="disabled"
+        )
+        self.cancel_button.grid(row=0, column=0, padx=(0, 8))
+        self.run_button = ttk.Button(action_row, text="Run anonymisation", command=self.run_anonymisation)
+        self.run_button.grid(row=0, column=1)
 
     def _make_listbox_section(self, parent: ttk.Frame, title: str, column: int) -> tk.Listbox:
         container = ttk.Frame(parent, padding=(0, 0, 12 if column == 0 else 0, 0))
@@ -225,42 +236,96 @@ class DesktopAnonymiserApp:
 
         self.status_var.set("Running anonymisation...")
         self.progress_var.set(0)
-        self.root.update_idletasks()
+        self.run_button.configure(state="disabled")
+        self.cancel_button.configure(state="normal")
+        self.cancel_event.clear()
 
         def progress_callback(processed: int, total: int, message: str) -> None:
-            progress = 100 if total == 0 else (processed / total) * 100
-            self.progress_var.set(progress)
-            self.status_var.set(message)
-            self.root.update_idletasks()
+            self.progress_queue.put(("progress", processed, total, message))
 
+        def cancel_check() -> bool:
+            return self.cancel_event.is_set()
+
+        def worker() -> None:
+            try:
+                anonymised_df, results_summary, residual_flags, stats = process_dataframe(
+                    self.dataframe,
+                    selected_columns,
+                    sorted(selected_entity_types),
+                    self.redaction_style_var.get(),
+                    float(self.score_threshold_var.get()),
+                    progress_callback=progress_callback,
+                    cancel_check=cancel_check,
+                )
+                write_output_workbook(output_path, anonymised_df, results_summary, residual_flags)
+                self.progress_queue.put(("done", stats, output_path))
+            except AnonymisationCancelled:
+                self.progress_queue.put(("cancelled",))
+            except Exception as exc:  # noqa: BLE001 - surfaced to the user via the queue
+                self.progress_queue.put(("error", str(exc)))
+
+        self.worker_thread = threading.Thread(target=worker, daemon=True)
+        self.worker_thread.start()
+        self.root.after(100, self._poll_progress_queue)
+
+    def cancel_anonymisation(self) -> None:
+        self.cancel_event.set()
+        self.cancel_button.configure(state="disabled")
+        self.status_var.set("Cancelling...")
+
+    def _poll_progress_queue(self) -> None:
         try:
-            anonymised_df, results_summary, residual_flags, stats = process_dataframe(
-                self.dataframe,
-                selected_columns,
-                sorted(selected_entity_types),
-                self.redaction_style_var.get(),
-                float(self.score_threshold_var.get()),
-                progress_callback=progress_callback,
-            )
-            write_output_workbook(output_path, anonymised_df, results_summary, residual_flags)
-        except Exception as exc:
-            messagebox.showerror("Anonymisation failed", str(exc))
-            self.status_var.set("Anonymisation failed.")
-            return
+            while True:
+                message = self.progress_queue.get_nowait()
+                kind = message[0]
 
-        self.progress_var.set(100)
-        self.status_var.set("Anonymisation complete.")
+                if kind == "progress":
+                    _, processed, total, status_message = message
+                    progress = 100 if total == 0 else (processed / total) * 100
+                    self.progress_var.set(progress)
+                    self.status_var.set(status_message)
 
-        messagebox.showinfo(
-            "Done",
-            (
-                f"Completed successfully.\n\n"
-                f"Records processed: {stats['records_processed']}\n"
-                f"Columns anonymised: {stats['columns_anonymised']}\n"
-                f"PII entities detected: {stats['pii_entities_detected']}\n"
-                f"Output saved to: {output_path}"
-            ),
-        )
+                elif kind == "done":
+                    _, stats, output_path = message
+                    self.progress_var.set(100)
+                    self.status_var.set("Anonymisation complete.")
+                    self._finish_run()
+                    messagebox.showinfo(
+                        "Done",
+                        (
+                            f"Completed successfully.\n\n"
+                            f"Records processed: {stats['records_processed']}\n"
+                            f"Columns anonymised: {stats['columns_anonymised']}\n"
+                            f"PII entities detected: {stats['pii_entities_detected']}\n"
+                            f"Output saved to: {output_path}"
+                        ),
+                    )
+                    return
+
+                elif kind == "cancelled":
+                    self.status_var.set("Anonymisation cancelled.")
+                    self.progress_var.set(0)
+                    self._finish_run()
+                    return
+
+                elif kind == "error":
+                    _, error_message = message
+                    self.status_var.set("Anonymisation failed.")
+                    self._finish_run()
+                    messagebox.showerror("Anonymisation failed", error_message)
+                    return
+
+        except queue.Empty:
+            pass
+
+        if self.worker_thread is not None and self.worker_thread.is_alive():
+            self.root.after(100, self._poll_progress_queue)
+        else:
+            self._finish_run()
+
+    def _finish_run(self) -> None:
+        self.run_button.configure(state="normal")
+        self.cancel_button.configure(state="disabled")
 
     def _populate_listbox(self, listbox: tk.Listbox, items: list[str]) -> None:
         listbox.delete(0, tk.END)
