@@ -74,6 +74,14 @@ In addition to standard Presidio + spaCy NER, the tool includes:
 
 Review the **Residual Flags** sheet after each run. Residual items are candidates for manual review, not automatic redactions of every capitalised word.
 
+### Updating to a new version
+Releases are published on the [Releases page](https://github.com/engageme1975/engage-me-data-anonymiser/releases) as `Engage-Me-Data-Anonymiser-windows.zip`, tagged with a version (e.g. `v1.1.0`). The app's title bar shows its version, so you can confirm which build is running without checking file dates.
+
+To update a machine that already has the app installed:
+1. Close the app if it is running (Windows can't overwrite a file that's in use).
+2. Delete the old `Engage-Me-Data-Anonymiser` folder entirely, rather than extracting the new zip on top of it - this avoids old files that no longer exist in the new build being left behind.
+3. Extract the new release zip in its place.
+
 ## Output Sheets
 - `Anonymised Data`: original rows + one anonymised output column per selected source column
 - `Detection Report`: each detected entity with source column, output column, row index, score, and span

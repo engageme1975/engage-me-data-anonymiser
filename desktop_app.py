@@ -19,6 +19,7 @@ from anonymization_core import (
     write_output_workbook,
 )
 
+APP_VERSION = "1.1.0"
 LARGE_FILE_ROW_WARNING = 3000
 
 
@@ -33,7 +34,7 @@ def format_duration(seconds: float) -> str:
 class DesktopAnonymiserApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        self.root.title("Engage-Me Data Anonymiser")
+        self.root.title(f"Engage-Me Data Anonymiser v{APP_VERSION}")
         self.root.geometry("1020x720")
         self.root.minsize(920, 640)
 
@@ -67,7 +68,7 @@ class DesktopAnonymiserApp:
         )
         ttk.Label(
             header,
-            text="A simple desktop app for local anonymisation without Docker.",
+            text=f"A simple desktop app for local anonymisation without Docker. (v{APP_VERSION})",
         ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(4, 0))
 
         file_row = ttk.Frame(self.root, padding=(16, 0, 16, 8))
