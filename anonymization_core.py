@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import math
 import os
 from pathlib import Path
 from typing import Callable, Iterable
 
 import pandas as pd
+from openpyxl import Workbook
 from presidio_anonymizer import AnonymizerEngine
 from presidio_anonymizer.entities import OperatorConfig
 
@@ -246,21 +248,56 @@ def process_dataframe(
     return output_df, results_summary, residual_flags, stats
 
 
+def _excel_safe(value):
+    """
+    openpyxl's write-only Worksheet.append() writes each cell as it's
+    called rather than building an in-memory grid, but it still rejects
+    NaN (pandas' missing-value marker propagates into object columns too,
+    not just numeric ones) since NaN has no valid Excel/XML representation.
+    """
+    if isinstance(value, float) and math.isnan(value):
+        return None
+    return value
+
+
 def write_output_workbook(destination, df: pd.DataFrame, results_summary: list[dict], residual_flags: list[dict]) -> None:
-    with pd.ExcelWriter(destination, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="Anonymised Data")
-        pd.DataFrame(results_summary).to_excel(writer, index=False, sheet_name="Detection Report")
-        if residual_flags:
-            residual_rows = []
-            for item in residual_flags:
-                for finding in item["findings"]:
-                    residual_rows.append(
-                        {
-                            "source_column": item["source_column"],
-                            "output_column": item["output_column"],
-                            "row_index": item["row_index"],
-                            "label": finding["label"],
-                            "text": finding["text"],
-                        }
-                    )
-            pd.DataFrame(residual_rows).to_excel(writer, index=False, sheet_name="Residual Flags")
+    """
+    Writes with openpyxl's write_only mode: rows are streamed to disk as
+    they're appended instead of being held as Python Cell objects for the
+    whole workbook. The standard pandas ExcelWriter/ws.to_excel() path
+    builds the entire workbook in memory first, which measurably crashed
+    with MemoryError on a Detection Report sheet with ~400k rows (a
+    realistic size at ~100k input rows, since each cell can produce
+    several detected entities) - this avoids that regardless of row count.
+    """
+    wb = Workbook(write_only=True)
+
+    data_sheet = wb.create_sheet("Anonymised Data")
+    data_sheet.append(list(df.columns))
+    for row in df.itertuples(index=False, name=None):
+        data_sheet.append([_excel_safe(value) for value in row])
+
+    detection_columns = [
+        "source_column", "output_column", "row_index",
+        "entity_type", "score", "original_text", "start", "end",
+    ]
+    detection_sheet = wb.create_sheet("Detection Report")
+    detection_sheet.append(detection_columns)
+    for item in results_summary:
+        detection_sheet.append([_excel_safe(item.get(column)) for column in detection_columns])
+
+    if residual_flags:
+        residual_columns = ["source_column", "output_column", "row_index", "label", "text"]
+        residual_sheet = wb.create_sheet("Residual Flags")
+        residual_sheet.append(residual_columns)
+        for item in residual_flags:
+            for finding in item["findings"]:
+                residual_sheet.append([
+                    _excel_safe(item["source_column"]),
+                    _excel_safe(item["output_column"]),
+                    _excel_safe(item["row_index"]),
+                    _excel_safe(finding["label"]),
+                    _excel_safe(finding["text"]),
+                ])
+
+    wb.save(destination)
