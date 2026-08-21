@@ -5,13 +5,13 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 import pandas as pd
-from presidio_analyzer.batch_analyzer_engine import BatchAnalyzerEngine
 from presidio_anonymizer import AnonymizerEngine
 from presidio_anonymizer.entities import OperatorConfig
 
 from beyond_recognizers import (
     create_beyond_analyzer,
     residual_scan,
+    scan_missed_proper_nouns,
     PERSON_FALSE_POSITIVE_ALLOW_LIST,
 )
 
@@ -140,9 +140,10 @@ def process_dataframe(
 ) -> tuple[pd.DataFrame, list[dict], list[dict], dict[str, int | float]]:
     output_df = df.copy()
     analyzer = create_beyond_analyzer(score_threshold=score_threshold)
-    batch_analyzer = BatchAnalyzerEngine(analyzer_engine=analyzer)
     anonymizer = AnonymizerEngine()
     operators = build_operators(selected_entity_types, redaction_style)
+    selected_entity_types = set(selected_entity_types)
+    scan_for_missed_names = "PERSON" in selected_entity_types
 
     results_summary: list[dict] = []
     residual_flags: list[dict] = []
@@ -162,16 +163,28 @@ def process_dataframe(
                 raise AnonymisationCancelled("Anonymisation cancelled by user.")
 
             chunk_texts = texts[chunk_start : chunk_start + ANALYSIS_CHUNK_SIZE]
-            chunk_analyses = batch_analyzer.analyze_iterator(
-                chunk_texts,
+            # Calling nlp_engine.process_batch()/analyzer.analyze() directly
+            # (rather than BatchAnalyzerEngine.analyze_iterator, which
+            # discards them) keeps nlp_artifacts around per text - needed
+            # below for scan_missed_proper_nouns, which reads spaCy's raw
+            # POS tags and entity list rather than Presidio's filtered
+            # output. Batching behaviour (and therefore throughput) is
+            # unchanged: this is what analyze_iterator does internally.
+            nlp_artifacts_batch = analyzer.nlp_engine.process_batch(
+                texts=chunk_texts,
                 language="en",
                 batch_size=_analysis_batch_size(),
                 n_process=_worker_process_count(),
-                allow_list=PERSON_FALSE_POSITIVE_ALLOW_LIST,
             )
 
-            for offset, (raw_text, analysis) in enumerate(zip(chunk_texts, chunk_analyses)):
+            for offset, (raw_text, nlp_artifacts) in enumerate(nlp_artifacts_batch):
                 row_index = chunk_start + offset
+                analysis = analyzer.analyze(
+                    text=raw_text,
+                    language="en",
+                    nlp_artifacts=nlp_artifacts,
+                    allow_list=PERSON_FALSE_POSITIVE_ALLOW_LIST,
+                )
                 redaction_targets = [
                     result for result in analysis if result.entity_type in selected_entity_types
                 ]
@@ -199,6 +212,10 @@ def process_dataframe(
                     )
 
                 residuals = residual_scan(anonymised_text)
+                if scan_for_missed_names:
+                    residuals = residuals + scan_missed_proper_nouns(
+                        nlp_artifacts, redaction_targets, PERSON_FALSE_POSITIVE_ALLOW_LIST
+                    )
                 if residuals:
                     residual_flags.append(
                         {
