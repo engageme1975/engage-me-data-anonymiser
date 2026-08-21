@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Callable, Iterable
 
 import pandas as pd
+from presidio_analyzer.batch_analyzer_engine import BatchAnalyzerEngine
 from presidio_anonymizer import AnonymizerEngine
 from presidio_anonymizer.entities import OperatorConfig
 
@@ -12,6 +14,37 @@ from beyond_recognizers import (
     residual_scan,
     PERSON_FALSE_POSITIVE_ALLOW_LIST,
 )
+
+
+def _worker_process_count() -> int:
+    """
+    Worker processes for Presidio's batch analyzer, sized to the machine
+    actually running the tool rather than a value tuned on one dev box.
+    Leaves a core free for the UI thread/OS so the app stays responsive
+    while a run is in progress; caps at 8 since NLP throughput gains
+    flatten out well before most machines' core counts.
+    """
+    cpu_count = os.cpu_count() or 1
+    return max(1, min(cpu_count - 1, 8))
+
+
+def _analysis_batch_size() -> int:
+    """
+    Docs per internal spaCy nlp.pipe() batch. Scales mildly with core count
+    since a machine with more workers can usefully keep more docs in flight,
+    bounded so a single-core machine still gets some batching benefit and a
+    many-core machine doesn't hold an excessive number of docs in memory.
+    """
+    return max(16, min(_worker_process_count() * 16, 128))
+
+
+# Rows per batch_analyzer.analyze_iterator() call. Batching lets spaCy's
+# nlp.pipe() amortise per-call overhead across many texts instead of paying
+# it once per row (the original bottleneck at scale), while still bounding
+# how long cancel_check() can go unchecked and how coarse progress updates
+# during the analysis phase get on very large files. Scales with worker
+# count so a multi-process run keeps every worker fed with a full chunk.
+ANALYSIS_CHUNK_SIZE = max(200, _analysis_batch_size() * _worker_process_count() * 4)
 
 
 ENTITY_TYPE_OPTIONS = [
@@ -107,6 +140,7 @@ def process_dataframe(
 ) -> tuple[pd.DataFrame, list[dict], list[dict], dict[str, int | float]]:
     output_df = df.copy()
     analyzer = create_beyond_analyzer(score_threshold=score_threshold)
+    batch_analyzer = BatchAnalyzerEngine(analyzer_engine=analyzer)
     anonymizer = AnonymizerEngine()
     operators = build_operators(selected_entity_types, redaction_style)
 
@@ -120,60 +154,67 @@ def process_dataframe(
 
     for source_column in selected_columns:
         output_column = anonymised_column_name(list(output_df.columns), source_column)
-        anonymised_texts = []
+        texts = output_df[source_column].fillna("").astype(str).tolist()
+        anonymised_texts: list[str] = []
 
-        for row_index, raw_text in enumerate(output_df[source_column].fillna("").astype(str)):
+        for chunk_start in range(0, len(texts), ANALYSIS_CHUNK_SIZE):
             if cancel_check is not None and cancel_check():
                 raise AnonymisationCancelled("Anonymisation cancelled by user.")
 
-            analysis = analyzer.analyze(
-                text=raw_text,
+            chunk_texts = texts[chunk_start : chunk_start + ANALYSIS_CHUNK_SIZE]
+            chunk_analyses = batch_analyzer.analyze_iterator(
+                chunk_texts,
                 language="en",
+                batch_size=_analysis_batch_size(),
+                n_process=_worker_process_count(),
                 allow_list=PERSON_FALSE_POSITIVE_ALLOW_LIST,
             )
-            redaction_targets = [
-                result for result in analysis if result.entity_type in selected_entity_types
-            ]
 
-            anonymised_result = anonymizer.anonymize(
-                text=raw_text,
-                analyzer_results=redaction_targets,
-                operators=operators,
-            )
-            anonymised_text = anonymised_result.text
-            anonymised_texts.append(anonymised_text)
+            for offset, (raw_text, analysis) in enumerate(zip(chunk_texts, chunk_analyses)):
+                row_index = chunk_start + offset
+                redaction_targets = [
+                    result for result in analysis if result.entity_type in selected_entity_types
+                ]
 
-            for result in redaction_targets:
-                results_summary.append(
-                    {
-                        "source_column": source_column,
-                        "output_column": output_column,
-                        "row_index": row_index,
-                        "entity_type": result.entity_type,
-                        "score": round(result.score, 3),
-                        "original_text": raw_text[result.start : result.end],
-                        "start": result.start,
-                        "end": result.end,
-                    }
+                anonymised_result = anonymizer.anonymize(
+                    text=raw_text,
+                    analyzer_results=redaction_targets,
+                    operators=operators,
                 )
+                anonymised_text = anonymised_result.text
+                anonymised_texts.append(anonymised_text)
 
-            residuals = residual_scan(anonymised_text)
-            if residuals:
-                residual_flags.append(
-                    {
-                        "source_column": source_column,
-                        "output_column": output_column,
-                        "row_index": row_index,
-                        "findings": residuals,
-                    }
-                )
+                for result in redaction_targets:
+                    results_summary.append(
+                        {
+                            "source_column": source_column,
+                            "output_column": output_column,
+                            "row_index": row_index,
+                            "entity_type": result.entity_type,
+                            "score": round(result.score, 3),
+                            "original_text": raw_text[result.start : result.end],
+                            "start": result.start,
+                            "end": result.end,
+                        }
+                    )
 
-            processed_cells += 1
-            if progress_callback is not None and (
-                processed_cells % progress_interval == 0 or processed_cells == total_cells
-            ):
-                status_message = f"Processed {processed_cells} of {total_cells} cells..."
-                progress_callback(processed_cells, total_cells, status_message)
+                residuals = residual_scan(anonymised_text)
+                if residuals:
+                    residual_flags.append(
+                        {
+                            "source_column": source_column,
+                            "output_column": output_column,
+                            "row_index": row_index,
+                            "findings": residuals,
+                        }
+                    )
+
+                processed_cells += 1
+                if progress_callback is not None and (
+                    processed_cells % progress_interval == 0 or processed_cells == total_cells
+                ):
+                    status_message = f"Processed {processed_cells} of {total_cells} cells..."
+                    progress_callback(processed_cells, total_cells, status_message)
 
         output_df[output_column] = anonymised_texts
 

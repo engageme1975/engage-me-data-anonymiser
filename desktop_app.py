@@ -410,4 +410,12 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    # Required before anything else when a frozen (PyInstaller) app on
+    # Windows may spawn worker processes - anonymization_core.py's batch
+    # analyzer uses multiprocessing (n_process) to parallelise NLP across
+    # CPU cores. Without this, each spawned worker would re-import this
+    # module and relaunch the whole GUI instead of just running its task.
+    import multiprocessing
+
+    multiprocessing.freeze_support()
     main()
