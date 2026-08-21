@@ -34,12 +34,24 @@ if ($LASTEXITCODE -ne 0) {
 & $Python -m spacy download en_core_web_md
 
 Write-Host "Building Windows executable..."
+# pyarrow and PIL are transitively installed for the Streamlit web app
+# (requirements.txt) but desktop_app.py (Tkinter) never imports them - they
+# were previously being swept into the bundle anyway (~90MB) by the
+# --collect-all hooks below. Test suites bundled by --collect-all are
+# likewise dead weight in a shipped build. Excluding all of them is a
+# behaviour-neutral size cut, not a functional change.
 & $Python -m PyInstaller --noconfirm --clean --onedir --name $OutputName `
     --collect-all en_core_web_md `
     --collect-all spacy `
     --collect-all thinc `
     --collect-all presidio_analyzer `
     --collect-all presidio_anonymizer `
+    --exclude-module pyarrow `
+    --exclude-module PIL `
+    --exclude-module streamlit `
+    --exclude-module spacy.tests `
+    --exclude-module thinc.tests `
+    --exclude-module pandas.tests `
     desktop_app.py
 
 Write-Host "Build complete. Find the executable in dist\$OutputName\$OutputName.exe"

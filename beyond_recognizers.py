@@ -91,6 +91,30 @@ TITLE_NAME_PATTERN = (
     r"[A-Z][a-zA-Z'’-]*(?:[ \t]+[A-Z][a-zA-Z'’-]*){0,2}"
 )
 
+# A capitalised word (or two) immediately after a call-log verb, or
+# immediately before a reporting verb, with no title attached at all -
+# e.g. "Called Munday back", "Left a message for Cole", "Daniel confirmed
+# she would be home". Large-scale testing (12k synthetic rows) showed this
+# is a real, measurable leak: ~3% of untitled surnames survive redaction
+# because neither spaCy nor TITLE_NAME_PATTERN/NAME_LABEL_PATTERN require a
+# title. Recall here is deliberately favoured over precision - this feeds
+# residual_scan (a manual-review flag) rather than a redaction recognizer,
+# since misfiring on "Called Reception back" costs a review row, whereas
+# misfiring in the redaction path would corrupt real text. Each lookbehind
+# branch must be its own Pattern because Python's re requires fixed-width
+# lookbehind, and the verb phrases differ in length.
+_NAME_TAIL = r"[A-Z][a-zA-Z'’-]+(?:[ \t][A-Z][a-zA-Z'’-]+)?"
+UNTITLED_NAME_PATTERNS = [
+    rf"(?<=Called ){_NAME_TAIL}",
+    rf"(?<=Spoke to ){_NAME_TAIL}",
+    rf"(?<=Spoke with ){_NAME_TAIL}",
+    rf"(?<=Left a message for ){_NAME_TAIL}",
+    rf"(?<=Contacted ){_NAME_TAIL}",
+    rf"(?<=Texted ){_NAME_TAIL}",
+    rf"(?<=Emailed ){_NAME_TAIL}",
+    rf"\b{_NAME_TAIL}(?=[ \t]+(?:confirmed|reported|rang|advised|stated|mentioned|requested)\b)",
+]
+
 
 def create_beyond_analyzer(score_threshold: float = 0.4) -> AnalyzerEngine:
     """
@@ -239,21 +263,41 @@ def residual_scan(text: str) -> List[Dict[str, Any]]:
     """
     Residual safety net after the main Presidio pass.
     Flags possible leftover postcodes, phones, NINOs, long digit sequences,
-    or person names (titled or in a "Name:" field) that survived redaction.
+    or person names (titled, untitled-but-in-a-call-log-phrase, or in a
+    "Name:" field) that survived redaction.
     """
-    patterns = [
+    case_insensitive_patterns = [
         (UK_POSTCODE_PATTERN, "POSSIBLE_UK_POSTCODE"),
         (UK_MOBILE_PATTERN, "POSSIBLE_UK_MOBILE"),
         (UK_LANDLINE_PATTERN, "POSSIBLE_UK_PHONE"),
         (UK_NINO_PATTERN, "POSSIBLE_NINO"),
         (r"\b\d{8,}\b", "LONG_DIGIT_SEQUENCE"),
-        (TITLE_NAME_PATTERN, "POSSIBLE_PERSON_TITLE"),
-        (NAME_LABEL_PATTERN, "POSSIBLE_NAME_LABEL"),
     ]
 
+    # These rely on [A-Z] to mean "actually capitalised" as their proper-noun
+    # signal - matching them case-insensitively (as the patterns above are)
+    # would let [A-Z] match lowercase too and flood the audit sheet with
+    # false positives on ordinary lowercase prose.
+    case_sensitive_patterns = [
+        (TITLE_NAME_PATTERN, "POSSIBLE_PERSON_TITLE"),
+        (NAME_LABEL_PATTERN, "POSSIBLE_NAME_LABEL"),
+    ] + [(pattern, "POSSIBLE_UNTITLED_NAME") for pattern in UNTITLED_NAME_PATTERNS]
+
     findings = []
-    for pattern, label in patterns:
+    for pattern, label in case_insensitive_patterns:
         for match in re.finditer(pattern, text, re.IGNORECASE):
+            matched_text = match.group()
+            if REDACTION_TAG_PATTERN.match(matched_text.strip()):
+                continue
+            findings.append({
+                "start": match.start(),
+                "end": match.end(),
+                "text": matched_text,
+                "label": label,
+            })
+
+    for pattern, label in case_sensitive_patterns:
+        for match in re.finditer(pattern, text):
             matched_text = match.group()
             if REDACTION_TAG_PATTERN.match(matched_text.strip()):
                 continue

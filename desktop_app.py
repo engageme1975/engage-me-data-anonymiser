@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import queue
 import threading
+import time
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -17,6 +18,16 @@ from anonymization_core import (
     process_dataframe,
     write_output_workbook,
 )
+
+LARGE_FILE_ROW_WARNING = 3000
+
+
+def format_duration(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    minutes, secs = divmod(seconds, 60)
+    if minutes:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
 
 
 class DesktopAnonymiserApp:
@@ -38,6 +49,8 @@ class DesktopAnonymiserApp:
         self.progress_queue: queue.Queue = queue.Queue()
         self.cancel_event = threading.Event()
         self.worker_thread: threading.Thread | None = None
+        self.run_start_time: float | None = None
+        self.controls_to_disable_during_run: list[tk.Widget] = []
 
         self._build_ui()
 
@@ -63,41 +76,47 @@ class DesktopAnonymiserApp:
 
         ttk.Label(file_row, text="Input file").grid(row=0, column=0, sticky="w")
         ttk.Entry(file_row, textvariable=self.file_path_var).grid(row=0, column=1, sticky="ew", padx=8)
-        ttk.Button(file_row, text="Browse", command=self.browse_input_file).grid(row=0, column=2, padx=(0, 8))
-        ttk.Button(file_row, text="Load", command=self.load_selected_file).grid(row=0, column=3)
+        browse_button = ttk.Button(file_row, text="Browse", command=self.browse_input_file)
+        browse_button.grid(row=0, column=2, padx=(0, 8))
+        load_button = ttk.Button(file_row, text="Load", command=self.load_selected_file)
+        load_button.grid(row=0, column=3)
 
         options = ttk.Frame(self.root, padding=(16, 0, 16, 8))
         options.grid(row=2, column=0, sticky="ew")
         options.columnconfigure(1, weight=1)
         options.columnconfigure(3, weight=1)
 
-        ttk.Checkbutton(
+        recommended_checkbutton = ttk.Checkbutton(
             options,
             text="Recommended mode for non-technical users",
             variable=self.recommended_mode_var,
             command=self.apply_recommended_defaults,
-        ).grid(row=0, column=0, sticky="w")
+        )
+        recommended_checkbutton.grid(row=0, column=0, sticky="w")
 
         ttk.Label(options, text="Detection threshold").grid(row=0, column=2, sticky="e", padx=(24, 8))
-        ttk.Scale(options, from_=0.1, to=0.9, variable=self.score_threshold_var, orient="horizontal").grid(
-            row=0, column=3, sticky="ew"
+        threshold_scale = ttk.Scale(
+            options, from_=0.1, to=0.9, variable=self.score_threshold_var, orient="horizontal"
         )
+        threshold_scale.grid(row=0, column=3, sticky="ew")
 
         style_frame = ttk.Frame(self.root, padding=(16, 0, 16, 8))
         style_frame.grid(row=3, column=0, sticky="ew")
         ttk.Label(style_frame, text="Redaction style").grid(row=0, column=0, sticky="w")
-        ttk.Radiobutton(
+        generic_radio = ttk.Radiobutton(
             style_frame,
             text="Generic <REDACTED> (recommended)",
             value="Generic <REDACTED> (recommended)",
             variable=self.redaction_style_var,
-        ).grid(row=0, column=1, sticky="w", padx=(12, 0))
-        ttk.Radiobutton(
+        )
+        generic_radio.grid(row=0, column=1, sticky="w", padx=(12, 0))
+        entity_radio = ttk.Radiobutton(
             style_frame,
             text="Entity-specific tags",
             value="Entity-specific tags",
             variable=self.redaction_style_var,
-        ).grid(row=0, column=2, sticky="w", padx=(12, 0))
+        )
+        entity_radio.grid(row=0, column=2, sticky="w", padx=(12, 0))
 
         body = ttk.Frame(self.root, padding=16)
         body.grid(row=4, column=0, sticky="nsew")
@@ -117,13 +136,26 @@ class DesktopAnonymiserApp:
         output_row.columnconfigure(1, weight=1)
         ttk.Label(output_row, text="Output file").grid(row=0, column=0, sticky="w")
         ttk.Entry(output_row, textvariable=self.output_path_var).grid(row=0, column=1, sticky="ew", padx=8)
-        ttk.Button(output_row, text="Save as", command=self.choose_output_file).grid(row=0, column=2)
+        save_as_button = ttk.Button(output_row, text="Save as", command=self.choose_output_file)
+        save_as_button.grid(row=0, column=2)
 
         progress_row = ttk.Frame(footer)
         progress_row.grid(row=1, column=0, sticky="ew", pady=(12, 0))
         progress_row.columnconfigure(0, weight=1)
         ttk.Progressbar(progress_row, variable=self.progress_var, maximum=100).grid(row=0, column=0, sticky="ew")
         ttk.Label(progress_row, textvariable=self.status_var).grid(row=1, column=0, sticky="w", pady=(6, 0))
+
+        self.controls_to_disable_during_run = [
+            browse_button,
+            load_button,
+            recommended_checkbutton,
+            threshold_scale,
+            generic_radio,
+            entity_radio,
+            save_as_button,
+            self.columns_box,
+            self.entities_box,
+        ]
 
         action_row = ttk.Frame(footer)
         action_row.grid(row=2, column=0, sticky="e", pady=(12, 0))
@@ -183,7 +215,11 @@ class DesktopAnonymiserApp:
         if not self.output_path_var.get().strip():
             self.output_path_var.set(str(Path(file_path).with_name(f"{Path(file_path).stem}_anonymised.xlsx")))
 
-        self.status_var.set(f"Loaded {len(self.dataframe)} rows and {len(self.dataframe.columns)} columns.")
+        row_count = len(self.dataframe)
+        status_message = f"Loaded {row_count} rows and {len(self.dataframe.columns)} columns."
+        if row_count > LARGE_FILE_ROW_WARNING:
+            status_message += " Large file - anonymisation will run in the background and may take a while; you can cancel anytime."
+        self.status_var.set(status_message)
 
     def apply_recommended_defaults(self) -> None:
         if self.dataframe is None:
@@ -239,6 +275,9 @@ class DesktopAnonymiserApp:
         self.run_button.configure(state="disabled")
         self.cancel_button.configure(state="normal")
         self.cancel_event.clear()
+        self.run_start_time = time.time()
+        for widget in self.controls_to_disable_during_run:
+            widget.configure(state="disabled")
 
         def progress_callback(processed: int, total: int, message: str) -> None:
             self.progress_queue.put(("progress", processed, total, message))
@@ -283,20 +322,33 @@ class DesktopAnonymiserApp:
                     _, processed, total, status_message = message
                     progress = 100 if total == 0 else (processed / total) * 100
                     self.progress_var.set(progress)
+                    if self.run_start_time is not None and 0 < processed < total:
+                        elapsed = time.time() - self.run_start_time
+                        estimated_total = elapsed * total / processed
+                        remaining = estimated_total - elapsed
+                        status_message += f" ({progress:.0f}%, about {format_duration(remaining)} remaining)"
                     self.status_var.set(status_message)
 
                 elif kind == "done":
                     _, stats, output_path = message
                     self.progress_var.set(100)
-                    self.status_var.set("Anonymisation complete.")
+                    elapsed = time.time() - self.run_start_time if self.run_start_time is not None else 0
+                    self.status_var.set(f"Anonymisation complete in {format_duration(elapsed)}.")
                     self._finish_run()
+                    residual_note = (
+                        f"Rows with possible residual items: {stats['rows_with_possible_residual_items']} "
+                        "(see Residual Flags sheet)\n"
+                        if stats["rows_with_possible_residual_items"]
+                        else ""
+                    )
                     messagebox.showinfo(
                         "Done",
                         (
-                            f"Completed successfully.\n\n"
+                            f"Completed successfully in {format_duration(elapsed)}.\n\n"
                             f"Records processed: {stats['records_processed']}\n"
                             f"Columns anonymised: {stats['columns_anonymised']}\n"
                             f"PII entities detected: {stats['pii_entities_detected']}\n"
+                            f"{residual_note}"
                             f"Output saved to: {output_path}"
                         ),
                     )
@@ -326,6 +378,8 @@ class DesktopAnonymiserApp:
     def _finish_run(self) -> None:
         self.run_button.configure(state="normal")
         self.cancel_button.configure(state="disabled")
+        for widget in self.controls_to_disable_during_run:
+            widget.configure(state="normal")
 
     def _populate_listbox(self, listbox: tk.Listbox, items: list[str]) -> None:
         listbox.delete(0, tk.END)
