@@ -65,14 +65,30 @@ The desktop app and core pipeline are designed for multi-thousand-row files:
 
 If you previously saw freezes around 10k–11k rows, rebuild the Windows EXE from current `main` and re-test. Older EXEs do not include the batching / background-thread changes.
 
+### Hardware guidance
+Benchmarked directly with enforced OS-level resource limits (Windows Job Objects - the same mechanism Docker uses), not estimated:
+
+| Test | Result |
+|---|---|
+| 100,000-row / 2-column file, full run | 932.7s (~15.5 min) total (analysis + Excel write), 649MB peak memory |
+| Same 100,000-row file, hard-capped at 1GB RAM | Succeeded with no slowdown (649MB peak, comfortably under the cap) |
+| 8,000-row file, hard-capped at 512MB RAM | Succeeded with no slowdown |
+| 8,000-row file, restricted to 1 CPU core | No difference vs 2 cores - this workload is single-threaded on a 2-core machine |
+
+Takeaways:
+- **RAM is not a practical concern** on modern hardware (even 2-4GB) once running a build that includes the streaming Excel writer (v1.1.2+) - the earlier `pd.ExcelWriter`/openpyxl default path could `MemoryError` on the Detection Report sheet for large files (one row per detected entity, not per input row) since it built the whole workbook in memory before saving.
+- **CPU core count matters less than expected below 3 cores** - worker count (`_worker_process_count()` in `anonymization_core.py`) is `cpu_count - 1`, so a 2-core machine only ever gets 1 worker regardless. Machines with 3+ cores get real multi-process parallelism, but this hasn't been benchmarked (no machine with more cores was available for testing).
+- **CPU speed, not core count or RAM, is the most likely bottleneck on genuinely low-spec hardware** - this can't be simulated with OS resource limits, only tested on the actual hardware.
+- Expect roughly 200-230 cells/sec (rows x selected columns) as a baseline; scale linearly for your file size.
+
 ## Residual name coverage
 In addition to standard Presidio + spaCy NER, the tool includes:
 
 - `Name: ...` field label recogniser (website form headers)
 - Title + name patterns (`Mr` / `Mrs` / `Miss` / `Ms` + name)
-- Residual scan flags for leftover titled names, untitled call-log names, postcodes, phones, NINOs, and long digit sequences
+- `scan_missed_proper_nouns` (in `beyond_recognizers.py`): flags spaCy proper-noun (POS=PROPN) tokens that fall outside every redacted span, reading the model's actual part-of-speech tags and raw entity labels rather than guessing sentence phrasing. It also surfaces the model's off-label tag when one exists (e.g. a missed name spaCy classified as `ORGANIZATION` or `DATE_TIME` instead of `PERSON`) - information Presidio's own `analyze()` output discards. An earlier verb-phrase regex list was removed after independent (Faker-generated) test data showed it added zero coverage beyond its own exact wording.
 
-Review the **Residual Flags** sheet after each run. Residual items are candidates for manual review, not automatic redactions of every capitalised word.
+Review the **Residual Flags** sheet after each run. Residual items are candidates for manual review, not automatic redactions of every capitalised word. No detection approach reaches 100% recall on free text - industry benchmarks put general-purpose PII tools at 57-73% recall on real enterprise data, so the review step is load-bearing, not a formality.
 
 ### Updating to a new version
 Releases are published on the [Releases page](https://github.com/engageme1975/engage-me-data-anonymiser/releases) as `Engage-Me-Data-Anonymiser-windows.zip`, tagged with a version (e.g. `v1.1.0`). The app's title bar shows its version, so you can confirm which build is running without checking file dates.
