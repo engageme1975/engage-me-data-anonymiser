@@ -24,6 +24,7 @@ REDACTABLE_ENTITY_TYPES = {
     "UK_POSTCODE",
     "HOUSING_REF",
     "ACCESS_CODE",
+    "UK_ADDRESS",
 }
 
 # Generic role/status words that spaCy's NER occasionally misclassifies as
@@ -77,6 +78,38 @@ UK_LANDLINE_PATTERN = r"\b(?:(?:\+44[\s\-]?|0)\d{2,4}[\s\-]?\d{3,4}[\s\-]?\d{3,4
 # names with initials (e.g. "Mr R A Poile"), so this structural label match
 # catches the whole value up to end of line as a high-confidence fallback.
 NAME_LABEL_PATTERN = r"(?<=Name: )[^\r\n]+"
+
+# Mirrors NAME_LABEL_PATTERN for website-form "Address: <value>" fields -
+# catches the whole address value as one high-confidence block, which also
+# covers town/county names inside it that spaCy's LOCATION recall misses.
+ADDRESS_LABEL_PATTERN = r"(?<=Address: )[^\r\n]+"
+
+# UK street address (house number + street name + a common street-type
+# suffix), e.g. "33 Waveney Rd", "44 Greenland Avenue", "7 The Green",
+# "34 herbert drive". Found via real Beyond Housing sample output: full
+# street addresses were passing through completely unredacted, since
+# UK_POSTCODE only matches the postcode itself and spaCy's LOCATION/GPE
+# recall on informal address prose is unreliable (same known weak spot as
+# PERSON - see beyond_recognizers module docs). Requires a recognisable
+# street-type word since a bare "number + capitalised word" (e.g. "12
+# Parkside", which has no suffix) is too easily confused with quantities,
+# list items, or dates to match safely without one.
+UK_STREET_SUFFIXES = (
+    r"Road|Rd|Street|St|Avenue|Ave|Drive|Dr|Court|Ct|Close|Lane|Ln|Way|"
+    r"Green|Rise|Gardens|Grove|Crescent|Cres|Place|Pl|Terrace|Walk|Row|"
+    r"Hill|Park|View|Mews|Square|Sq|Gate|Fields|Meadow|Common|Circus|"
+    r"Parade|Wharf|Yard"
+)
+# A word (or "The") is required immediately before the suffix - without
+# this, "digit + bare suffix" (e.g. "3 Court dates", "10 Bank holidays",
+# "2 Park visits") would false-positive on ordinary English sentences,
+# since several suffixes (Park, Green, Bank, Common, View, Way, Hill) are
+# everyday words as well as street-name endings.
+UK_STREET_ADDRESS_PATTERN = (
+    r"\b\d{1,4}[A-Za-z]?[ ,]+"
+    r"(?:(?:The[ ]+)|(?:[A-Za-z][a-zA-Z'’-]*[ ]+){1,3})"
+    rf"(?:{UK_STREET_SUFFIXES})\b"
+)
 
 # UK title + name, used in free-flowing complaint prose (e.g. "Miss Cole
 # received a letter", "Mr & Mrs Judge of 8 Waterlow Road"). spaCy's NER
@@ -167,11 +200,42 @@ def create_beyond_analyzer(score_threshold: float = 0.4) -> AnalyzerEngine:
             Pattern("TEN style", r"\bTEN(?:ANCY)?[- ]?\d{4,8}\b", 0.70),
             Pattern("CUS / Customer", r"\b(?:CUS|CUSTOMER)[- ]?\d{4,8}\b", 0.65),
             Pattern("JOB / REF / WO", r"\b(?:JOB|REF|PROP|WO|WORK)[- ]?\d{4,8}\b", 0.55),
+            # Bare reference numbers (e.g. "Tenancy Reference: 1578004013")
+            # have no letter prefix to match on, unlike the styles above -
+            # relies entirely on the "tenancy"/"reference" context words
+            # below to clear the redaction threshold, the same low-base-
+            # score-plus-context-boost approach ACCESS_CODE uses for bare
+            # digits.
+            Pattern("Bare long reference number", r"\b\d{6,12}\b", 0.3),
         ],
         context=[
             "property", "ref", "reference", "job", "repair", "tenancy",
             "tenant", "customer", "order", "works order", "bh-", "rep-", "ten-",
         ],
+        supported_language="en",
+        global_regex_flags=re.IGNORECASE,
+    )
+
+    # UK street addresses in free-flowing prose - see UK_STREET_ADDRESS_PATTERN
+    # for why this needs its own recognizer (real sample data showed these
+    # passing through completely unredacted).
+    street_address_recognizer = PatternRecognizer(
+        supported_entity="UK_ADDRESS",
+        name="Beyond UK Street Address",
+        patterns=[Pattern("Street address", UK_STREET_ADDRESS_PATTERN, 0.75)],
+        context=[
+            "address", "property", "flat", "house", "street", "road",
+            "lane", "avenue", "moved", "tenant of", "tenancy",
+        ],
+        supported_language="en",
+        global_regex_flags=re.IGNORECASE,
+    )
+
+    address_label_recognizer = PatternRecognizer(
+        supported_entity="UK_ADDRESS",
+        name="Beyond Address Label Field",
+        patterns=[Pattern("Address: label", ADDRESS_LABEL_PATTERN, 0.90)],
+        context=["address:"],
         supported_language="en",
         global_regex_flags=re.IGNORECASE,
     )
@@ -220,6 +284,8 @@ def create_beyond_analyzer(score_threshold: float = 0.4) -> AnalyzerEngine:
     registry.add_recognizer(access_code)
     registry.add_recognizer(name_label_recognizer)
     registry.add_recognizer(title_name_recognizer)
+    registry.add_recognizer(street_address_recognizer)
+    registry.add_recognizer(address_label_recognizer)
 
     analyzer = AnalyzerEngine(
         registry=registry,
@@ -254,6 +320,8 @@ def residual_scan(text: str) -> List[Dict[str, Any]]:
         (UK_LANDLINE_PATTERN, "POSSIBLE_UK_PHONE"),
         (UK_NINO_PATTERN, "POSSIBLE_NINO"),
         (r"\b\d{8,}\b", "LONG_DIGIT_SEQUENCE"),
+        (UK_STREET_ADDRESS_PATTERN, "POSSIBLE_UK_ADDRESS"),
+        (ADDRESS_LABEL_PATTERN, "POSSIBLE_ADDRESS_LABEL"),
     ]
 
     # These rely on [A-Z] to mean "actually capitalised" as their proper-noun

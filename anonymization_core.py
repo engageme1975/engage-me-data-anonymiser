@@ -55,6 +55,7 @@ ENTITY_TYPE_OPTIONS = [
     ("Email addresses", "EMAIL_ADDRESS"),
     ("National Insurance numbers (UK_NINO)", "UK_NINO"),
     ("UK postcodes", "UK_POSTCODE"),
+    ("Street addresses (UK_ADDRESS)", "UK_ADDRESS"),
     ("Housing / repair / tenancy references (HOUSING_REF)", "HOUSING_REF"),
     ("Key-safe / access codes (ACCESS_CODE)", "ACCESS_CODE"),
     ("Broader locations (LOCATION)", "LOCATION"),
@@ -68,6 +69,7 @@ DEFAULT_ENTITY_TYPES = {
     "EMAIL_ADDRESS",
     "UK_NINO",
     "UK_POSTCODE",
+    "UK_ADDRESS",
     "HOUSING_REF",
     "ACCESS_CODE",
 }
@@ -78,6 +80,7 @@ ENTITY_SPECIFIC_LABELS = {
     "EMAIL_ADDRESS": "<EMAIL>",
     "UK_NINO": "<NINO>",
     "UK_POSTCODE": "<POSTCODE>",
+    "UK_ADDRESS": "<ADDRESS>",
     "HOUSING_REF": "<HOUSING_REF>",
     "ACCESS_CODE": "<ACCESS_CODE>",
     "LOCATION": "<LOCATION>",

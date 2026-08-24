@@ -90,6 +90,17 @@ In addition to standard Presidio + spaCy NER, the tool includes:
 
 Review the **Residual Flags** sheet after each run. Residual items are candidates for manual review, not automatic redactions of every capitalised word. No detection approach reaches 100% recall on free text - industry benchmarks put general-purpose PII tools at 57-73% recall on real enterprise data, so the review step is load-bearing, not a formality.
 
+## Street address coverage (UK_ADDRESS)
+Real Beyond Housing sample output surfaced a significant gap: full street addresses (house number + street name, e.g. "33 Waveney Rd", "44 Greenland Avenue") were passing through **completely unredacted** - `UK_POSTCODE` only matches the postcode itself, and spaCy's location/GPE recall on informal address prose is unreliable (the same known weak spot as `PERSON`). A bare numeric tenancy reference (e.g. "Tenancy Reference: 1578004013", no letter prefix) was similarly invisible to `HOUSING_REF`'s prefix-based patterns.
+
+Fixed with:
+- A `UK_ADDRESS` entity type (on by default) matching house number + street name + a recognised UK street-type suffix (Road, Avenue, Close, Drive, Court, Green, ...). Requires a real word or "The" immediately before the suffix, so ordinary sentences like "3 Court dates were set" or "10 Bank holidays" can't false-positive on the suffix alone.
+- An `Address: ...` field label recogniser (mirrors the `Name:` one) that catches a whole structured address line as one block.
+- A context-boosted bare-digit pattern added to `HOUSING_REF` for reference numbers with no letter prefix.
+- `POSSIBLE_UK_ADDRESS` added to the Residual Flags safety net, so a street address with no recognisable suffix (e.g. "12 Parkside") - a known accepted gap, since matching bare "number + word" safely needs a gazetteer, not a regex - still gets flagged for manual review instead of silently passing through.
+
+Verified directly against real (sanitised) Beyond Housing sample output: 6 of 6 addresses with a recognisable street-type suffix now redact correctly, the one without a suffix is flagged for review, and the tenancy reference number now redacts.
+
 ### Updating to a new version
 Releases are published on the [Releases page](https://github.com/engageme1975/engage-me-data-anonymiser/releases) as `Engage-Me-Data-Anonymiser-windows.zip`, tagged with a version (e.g. `v1.1.0`). The app's title bar shows its version, so you can confirm which build is running without checking file dates.
 
