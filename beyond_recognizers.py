@@ -4,14 +4,18 @@ Tuned for UK social housing repair / contact comments.
 Includes research-backed UK NINO, phone and postcode patterns.
 """
 
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional, Set
+from pathlib import Path
+import sys
 from presidio_analyzer import (
     Pattern,
     PatternRecognizer,
     RecognizerRegistry,
     AnalyzerEngine,
+    EntityRecognizer,
+    RecognizerResult,
 )
-from presidio_analyzer.nlp_engine import NlpEngineProvider
+from presidio_analyzer.nlp_engine import NlpEngineProvider, NlpArtifacts
 import re
 
 
@@ -25,6 +29,7 @@ REDACTABLE_ENTITY_TYPES = {
     "HOUSING_REF",
     "ACCESS_CODE",
     "UK_ADDRESS",
+    "LOCATION",
 }
 
 # Generic role/status words that spaCy's NER occasionally misclassifies as
@@ -94,14 +99,11 @@ ADDRESS_LABEL_PATTERN = r"(?<=Address: )[^\r\n]+"
 
 # UK street address (house number + street name + a common street-type
 # suffix), e.g. "33 Waveney Rd", "44 Greenland Avenue", "7 The Green",
-# "34 herbert drive". Found via real Beyond Housing sample output: full
-# street addresses were passing through completely unredacted, since
-# UK_POSTCODE only matches the postcode itself and spaCy's LOCATION/GPE
-# recall on informal address prose is unreliable (same known weak spot as
-# PERSON - see beyond_recognizers module docs). Requires a recognisable
-# street-type word since a bare "number + capitalised word" (e.g. "12
-# Parkside", which has no suffix) is too easily confused with quantities,
-# list items, or dates to match safely without one.
+# "34 herbert drive". Clients using this for repair-comment analysis are
+# happy to over-redact addresses, so recall beats precision here. A
+# second, broader pattern below also catches unsuffixed names such as
+# "12 Parkside". Dates and quantity phrases are carved out so repair
+# timelines survive ("15 May 2023", "3 days later", "2 hour visit").
 UK_STREET_SUFFIXES = (
     r"Road|Rd|Street|St|Avenue|Ave|Drive|Dr|Court|Ct|Close|Lane|Ln|Way|"
     r"Green|Rise|Gardens|Grove|Crescent|Cres|Place|Pl|Terrace|Walk|Row|"
@@ -119,6 +121,144 @@ UK_STREET_ADDRESS_PATTERN = (
     rf"(?:{UK_STREET_SUFFIXES})\b"
 )
 
+# UK street address with NO recognisable suffix (e.g. "12 Parkside", "45
+# Setters Hill Estate") - previously a known, accepted gap: matching bare
+# "number + word(s)" safely needs a real gazetteer, not a regex, since most
+# short capitalised words after a number are quantities/list items/dates,
+# not addresses ("3 Court dates", "10 Bank holidays" - see
+# UK_STREET_ADDRESS_PATTERN above).
+#
+# Closed using OS Open Names (Ordnance Survey's free, open GB gazetteer -
+# https://www.ordnancesurvey.co.uk/products/os-open-names): 372,801 unique
+# "Named Road" entries, of which 69,143 (~18.5%) have no recognised street-
+# type suffix word. Bundled locally as uk_road_names.txt (derived, ~5.9MB;
+# the source ~106MB CSV download is not shipped).
+#
+# Auto-redaction is restricted to MULTI-WORD gazetteer matches (2-3 words,
+# e.g. "Nikkavord Lea", "North Toogs", "Setters Hill Estate" - 54,851 of the
+# 69,143 no-suffix names). A number followed by that exact multi-word
+# sequence coinciding with ordinary prose by chance is negligible risk.
+# Single-word matches (14,292 names, e.g. "Bank", "Camp", "Glen", "Roadside")
+# are NOT auto-redacted - too many are ordinary short English words, and
+# "4 Bank" wrongly eating "4 Bank holidays" is a worse trade than leaving it
+# for manual review. Those are instead surfaced via residual_scan's
+# gazetteer check below (POSSIBLE_UK_ADDRESS_GAZETTEER) so they're still
+# flagged, not silently dropped.
+def _load_road_gazetteer_files() -> tuple[Set[str], Set[str]]:
+    base_dir = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
+    gazetteer_path = base_dir / "uk_road_names.txt"
+    multi_word: Set[str] = set()
+    single_word: Set[str] = set()
+    if not gazetteer_path.exists():
+        return multi_word, single_word
+    with gazetteer_path.open("r", encoding="utf-8") as f:
+        for line in f:
+            name = line.strip()
+            if not name:
+                continue
+            key = name.lower()
+            if " " in key:
+                multi_word.add(key)
+            else:
+                single_word.add(key)
+    return multi_word, single_word
+
+
+UK_ROAD_GAZETTEER_MULTI_WORD, UK_ROAD_GAZETTEER_SINGLE_WORD = _load_road_gazetteer_files()
+
+# House number + 1-3 capitalised words, used to find candidate phrases to
+# check against the gazetteer sets above. Deliberately looser than
+# UK_STREET_ADDRESS_PATTERN (no suffix requirement) since the gazetteer
+# lookup itself - not a suffix word - is what confirms it's a real address.
+UK_ADDRESS_CANDIDATE_PATTERN = re.compile(
+    r"\b\d{1,4}[A-Za-z]?[ ,]+"
+    r"(?:[A-Z][a-zA-Z'’-]*(?:[ ]+(?=[A-Z]))?){1,3}"
+)
+
+
+class UkGazetteerAddressRecognizer(EntityRecognizer):
+    """
+    Auto-redacts addresses with no street-type suffix by checking house-
+    number-prefixed candidate phrases against the OS Open Names gazetteer -
+    see the comment above UK_ROAD_GAZETTEER_MULTI_WORD for why this is
+    restricted to multi-word matches only.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            supported_entities=["UK_ADDRESS"],
+            name="Beyond UK Gazetteer Address (no suffix)",
+            supported_language="en",
+        )
+
+    def load(self) -> None:  # pragma: no cover - nothing to load
+        pass
+
+    def analyze(
+        self,
+        text: str,
+        entities: List[str],
+        nlp_artifacts: Optional[NlpArtifacts] = None,
+    ) -> List[RecognizerResult]:
+        if "UK_ADDRESS" not in entities and "ALL" not in entities:
+            return []
+        if not UK_ROAD_GAZETTEER_MULTI_WORD:
+            return []
+
+        results = []
+        for match in UK_ADDRESS_CANDIDATE_PATTERN.finditer(text):
+            matched = match.group()
+            number_match = re.match(r"\d{1,4}[A-Za-z]?", matched)
+            words_start = number_match.end()
+            words_blob = matched[words_start:].strip(" ,")
+            words = words_blob.split()
+            if len(words) < 2:
+                continue
+            # Try the longest word-count phrase first (3 then 2 words) so a
+            # 3-word gazetteer entry isn't missed in favour of a shorter one.
+            for n in range(min(len(words), 3), 1, -1):
+                phrase = " ".join(words[:n]).lower()
+                if phrase in UK_ROAD_GAZETTEER_MULTI_WORD:
+                    phrase_start = match.start() + matched.index(words[0], words_start)
+                    phrase_end = phrase_start + len(" ".join(words[:n]))
+                    results.append(
+                        RecognizerResult(
+                            entity_type="UK_ADDRESS",
+                            start=match.start(),
+                            end=phrase_end,
+                            score=0.8,
+                        )
+                    )
+                    break
+        return results
+
+
+# NOTE: an earlier version of this address work also had
+# HOUSE_NUMBER_NAME_PATTERN (house number + Title-Case word(s), no suffix
+# required) and PREPOSITION_ADDRESS_PATTERNS ("of/at/from <number>
+# <word(s)>"), meant to close the same no-suffix gap as
+# UkGazetteerAddressRecognizer above via a broad regex instead of a real
+# gazetteer lookup. Both were removed after adversarial testing:
+# HOUSE_NUMBER_NAME_PATTERN's own global_regex_flags=re.IGNORECASE silently
+# defeated its [A-Z] Title-Case gate (IGNORECASE makes [A-Z] match lowercase
+# too), so it matched almost any "number + a few words" - e.g. "10 Bank
+# holidays fall" got redacted whole. Even re-tested case-sensitively, it
+# still false-positived on every adversarial case ("3 Court dates", "2 New
+# Builds", "5 Working Days") - real housing-complaint text capitalises
+# non-name words constantly (numbered list items, emphasis), so Title-Case
+# alone isn't a safe signal in this domain. PREPOSITION_ADDRESS_PATTERNS
+# used a deliberately case-insensitive core and failed independently of the
+# IGNORECASE bug ("at 3 Different Times", "of 4 Similar Properties").
+
+FLAT_BUILDING_PATTERN = (
+    r"\b(?:flat|apartment|unit|apt)\.?[ ]+\d+[A-Za-z]?"
+    r"(?:[ ]*[,/][ ]*\d+[A-Za-z]?)?"
+    r"(?:[ ,]+(?:[A-Z][A-Za-z'’-]*[ ]*){1,4}"
+    r"(?:House|Court|Tower|Lodge|Mansions|Apartments|Building|Block|"
+    r"Place|Residences|Hall))?"
+    r"\b"
+)
+
 # UK title + name, used in free-flowing complaint prose (e.g. "Miss Cole
 # received a letter", "Mr & Mrs Judge of 8 Waterlow Road"). spaCy's NER
 # inconsistently detects these short informal mentions, and in at least one
@@ -133,6 +273,57 @@ TITLE_NAME_PATTERN = (
 )
 
 
+
+
+
+class PostcodeAnchoredAddressRecognizer(EntityRecognizer):
+    """
+    When a UK postcode is present, redact backwards to the first house
+    number / flat token in the same clause. Repair comments often have
+    "7 The Green, South Creake, Fakenham NR21 1AA" - the street matcher
+    would leave the towns. Over-redaction of that whole block is intended.
+    """
+
+    def __init__(self):
+        super().__init__(
+            supported_entities=["UK_ADDRESS"],
+            name="Beyond Postcode-Anchored Address",
+            supported_language="en",
+        )
+        self._postcode = re.compile(UK_POSTCODE_PATTERN, re.IGNORECASE)
+        self._start_token = re.compile(
+            r"\b(?:flat|apartment|unit|apt|no\.?|number)?\s*\d+[A-Za-z]?\b",
+            re.IGNORECASE,
+        )
+
+    def analyze(self, text, entities, nlp_artifacts=None):
+        if entities and "UK_ADDRESS" not in entities:
+            return []
+        results = []
+        for match in self._postcode.finditer(text):
+            postcode_start, postcode_end = match.start(), match.end()
+            window_start = max(0, postcode_start - 120)
+            prefix = text[window_start:postcode_start]
+            boundary = max(prefix.rfind("."), prefix.rfind("\n"), prefix.rfind(";"))
+            candidate_start = window_start + boundary + 1 if boundary >= 0 else window_start
+            candidate = text[candidate_start:postcode_end]
+            if not re.search(
+                rf"\b(\d+[A-Za-z]?|flat\s+\d+|apartment\s+\d+|{UK_STREET_SUFFIXES})\b",
+                candidate,
+                re.IGNORECASE,
+            ):
+                continue
+            first = self._start_token.search(candidate)
+            start = candidate_start + first.start() if first else candidate_start
+            results.append(
+                RecognizerResult(
+                    entity_type="UK_ADDRESS",
+                    start=start,
+                    end=postcode_end,
+                    score=0.90,
+                )
+            )
+        return results
 
 
 def create_beyond_analyzer(score_threshold: float = 0.4) -> AnalyzerEngine:
@@ -230,7 +421,10 @@ def create_beyond_analyzer(score_threshold: float = 0.4) -> AnalyzerEngine:
     street_address_recognizer = PatternRecognizer(
         supported_entity="UK_ADDRESS",
         name="Beyond UK Street Address",
-        patterns=[Pattern("Street address", UK_STREET_ADDRESS_PATTERN, 0.75)],
+        patterns=[
+            Pattern("Street address", UK_STREET_ADDRESS_PATTERN, 0.75),
+            Pattern("Flat / building", FLAT_BUILDING_PATTERN, 0.72),
+        ],
         context=[
             "address", "property", "flat", "house", "street", "road",
             "lane", "avenue", "moved", "tenant of", "tenancy",
@@ -247,6 +441,8 @@ def create_beyond_analyzer(score_threshold: float = 0.4) -> AnalyzerEngine:
         supported_language="en",
         global_regex_flags=re.IGNORECASE,
     )
+
+    gazetteer_address_recognizer = UkGazetteerAddressRecognizer()
 
     # Key-safe / Access codes
     access_code = PatternRecognizer(
@@ -294,6 +490,8 @@ def create_beyond_analyzer(score_threshold: float = 0.4) -> AnalyzerEngine:
     registry.add_recognizer(title_name_recognizer)
     registry.add_recognizer(street_address_recognizer)
     registry.add_recognizer(address_label_recognizer)
+    registry.add_recognizer(gazetteer_address_recognizer)
+    registry.add_recognizer(PostcodeAnchoredAddressRecognizer())
 
     analyzer = AnalyzerEngine(
         registry=registry,
@@ -329,6 +527,7 @@ def residual_scan(text: str) -> List[Dict[str, Any]]:
         (UK_NINO_PATTERN, "POSSIBLE_NINO"),
         (r"\b\d{8,}\b", "LONG_DIGIT_SEQUENCE"),
         (UK_STREET_ADDRESS_PATTERN, "POSSIBLE_UK_ADDRESS"),
+        (FLAT_BUILDING_PATTERN, "POSSIBLE_UK_ADDRESS"),
         (ADDRESS_LABEL_PATTERN, "POSSIBLE_ADDRESS_LABEL"),
     ]
 
@@ -364,6 +563,29 @@ def residual_scan(text: str) -> List[Dict[str, Any]]:
                 "end": match.end(),
                 "text": matched_text,
                 "label": label,
+            })
+
+    # Single-word OS Open Names gazetteer matches (e.g. "4 Bank", "12
+    # Roadside") are deliberately not auto-redacted by
+    # UkGazetteerAddressRecognizer - too many are ordinary short English
+    # words to redact on a number + exact-match alone. Flagged here instead
+    # so they still reach manual review rather than disappearing silently.
+    if UK_ROAD_GAZETTEER_SINGLE_WORD:
+        for match in UK_ADDRESS_CANDIDATE_PATTERN.finditer(text):
+            matched_text = match.group()
+            number_match = re.match(r"\d{1,4}[A-Za-z]?", matched_text)
+            words_start = number_match.end()
+            words_blob = matched_text[words_start:].strip(" ,")
+            words = words_blob.split()
+            if len(words) != 1:
+                continue
+            if words[0].lower() not in UK_ROAD_GAZETTEER_SINGLE_WORD:
+                continue
+            findings.append({
+                "start": match.start(),
+                "end": match.end(),
+                "text": matched_text,
+                "label": "POSSIBLE_UK_ADDRESS_GAZETTEER",
             })
     return findings
 

@@ -9,6 +9,7 @@ on:
       - "app.py"
       - "anonymization_core.py"
       - "beyond_recognizers.py"
+      - "uk_road_names.txt"
       - "requirements.txt"
       - "Dockerfile"
       - ".github/workflows/build-docker-image.yml"

@@ -20,7 +20,7 @@ WORKDIR /app
 # Copy only necessary artifacts
 COPY --from=builder /root/.local /root/.local
 COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
-COPY beyond_recognizers.py anonymization_core.py app.py ./
+COPY beyond_recognizers.py anonymization_core.py app.py uk_road_names.txt ./
 
 ENV PATH=/root/.local/bin:$PATH
 ENV PYTHONUNBUFFERED=1

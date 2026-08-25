@@ -99,6 +99,7 @@ Write-Host "Building Windows executable..."
 # behaviour-neutral size cut, not a functional change.
 & $Python -m PyInstaller --noconfirm --clean --onedir --name $OutputName `
     --version-file $versionFilePath `
+    --add-data "uk_road_names.txt;." `
     --collect-all en_core_web_md `
     --collect-all spacy `
     --collect-all thinc `
