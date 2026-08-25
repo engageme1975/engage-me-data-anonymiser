@@ -222,6 +222,20 @@ def process_dataframe(
                         nlp_artifacts, redaction_targets, PERSON_FALSE_POSITIVE_ALLOW_LIST
                     )
                 if residuals:
+                    # A reviewer deciding "is this actually a name/address"
+                    # previously had to leave the workbook and go find this
+                    # exact row in the source file to see the surrounding
+                    # sentence - the flagged text alone is often ambiguous
+                    # out of context. Capturing a snippet here (while
+                    # anonymised_text is in scope) means both the summary
+                    # and per-row sheets can show it directly.
+                    for finding in residuals:
+                        ctx_start = max(0, finding["start"] - 40)
+                        ctx_end = min(len(anonymised_text), finding["end"] + 40)
+                        prefix = "..." if ctx_start > 0 else ""
+                        suffix = "..." if ctx_end < len(anonymised_text) else ""
+                        snippet = anonymised_text[ctx_start:ctx_end].replace("\n", " ").replace("\r", " ")
+                        finding["context"] = f"{prefix}{snippet}{suffix}"
                     residual_flags.append(
                         {
                             "source_column": source_column,
@@ -298,16 +312,17 @@ def write_output_workbook(destination, df: pd.DataFrame, results_summary: list[d
         # sample of where to look if someone wants to check context.
         # Placed before the full per-row sheet, not instead of it.
         summary_sheet = wb.create_sheet("Residual Flags Summary")
-        summary_sheet.append(["text", "label", "occurrences", "example_locations"])
-        for text, label, count, examples in _summarise_residual_flags(residual_flags):
+        summary_sheet.append(["text", "label", "occurrences", "sample_context", "example_locations"])
+        for text, label, count, sample_context, examples in _summarise_residual_flags(residual_flags):
             summary_sheet.append([
                 _excel_safe(text),
                 _excel_safe(label),
                 _excel_safe(count),
+                _excel_safe(sample_context),
                 _excel_safe(examples),
             ])
 
-        residual_columns = ["source_column", "output_column", "row_index", "label", "text"]
+        residual_columns = ["source_column", "output_column", "row_index", "label", "text", "context"]
         residual_sheet = wb.create_sheet("Residual Flags")
         residual_sheet.append(residual_columns)
         for item in residual_flags:
@@ -318,6 +333,7 @@ def write_output_workbook(destination, df: pd.DataFrame, results_summary: list[d
                     _excel_safe(item["row_index"]),
                     _excel_safe(finding["label"]),
                     _excel_safe(finding["text"]),
+                    _excel_safe(finding.get("context", "")),
                 ])
 
     wb.save(destination)
@@ -325,7 +341,7 @@ def write_output_workbook(destination, df: pd.DataFrame, results_summary: list[d
 
 def _summarise_residual_flags(
     residual_flags: list[dict], max_examples: int = 3
-) -> list[tuple[str, str, int, str]]:
+) -> list[tuple[str, str, int, str, str]]:
     """
     Groups residual flags by (text, label) and returns one row per unique
     combination, most frequent first, with a small sample of where each
@@ -333,12 +349,20 @@ def _summarise_residual_flags(
     items (most likely either a real recurring leak or common review-
     sheet noise) at the top rather than requiring a scroll through
     thousands of rows in file order to notice a pattern.
+
+    Also carries one sample_context snippet per group - on data where most
+    flagged values are unique (real customer names, unlike a synthetic test
+    file's repeated small name pool), the frequency-based grouping barely
+    reduces row count, so the context snippet is what actually saves a
+    reviewer from opening the source file to judge each item: many
+    "POSSIBLE_MISSED_NAME" flags are obviously real or obviously not once
+    the surrounding sentence is visible, without needing to go find it.
     """
     groups: dict[tuple[str, str], dict] = {}
     for item in residual_flags:
         for finding in item["findings"]:
             key = (finding["text"], finding["label"])
-            group = groups.setdefault(key, {"count": 0, "examples": []})
+            group = groups.setdefault(key, {"count": 0, "examples": [], "context": finding.get("context", "")})
             group["count"] += 1
             if len(group["examples"]) < max_examples:
                 group["examples"].append(f"{item['source_column']} row {item['row_index']}")
@@ -348,7 +372,7 @@ def _summarise_residual_flags(
         examples = ", ".join(group["examples"])
         if group["count"] > len(group["examples"]):
             examples += f", +{group['count'] - len(group['examples'])} more"
-        rows.append((text, label, group["count"], examples))
+        rows.append((text, label, group["count"], group["context"], examples))
 
     rows.sort(key=lambda row: row[2], reverse=True)
     return rows
