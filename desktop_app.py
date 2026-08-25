@@ -19,7 +19,7 @@ from anonymization_core import (
     write_output_workbook,
 )
 
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.3.1"
 LARGE_FILE_ROW_WARNING = 3000
 
 
