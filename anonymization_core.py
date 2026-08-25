@@ -70,6 +70,7 @@ DEFAULT_ENTITY_TYPES = {
     "UK_NINO",
     "UK_POSTCODE",
     "UK_ADDRESS",
+    "LOCATION",
     "HOUSING_REF",
     "ACCESS_CODE",
 }
