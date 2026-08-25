@@ -312,7 +312,18 @@ def write_output_workbook(destination, df: pd.DataFrame, results_summary: list[d
         # appearing 200 times is one reviewable line, not 200, with a
         # sample of where to look if someone wants to check context.
         # Placed before the full per-row sheet, not instead of it.
-        summary_sheet = wb.create_sheet("Residual Flags Summary")
+        #
+        # Sheet names and a leading instruction row exist so a reviewer who
+        # opens the wrong tab first (the full per-occurrence detail, not
+        # the summary) realises immediately - found via a real case where
+        # someone was about to manually work through 557 raw detail rows
+        # instead of the 16-line summary that covers the same findings.
+        summary_sheet = wb.create_sheet("Residual Flags - REVIEW HERE")
+        summary_sheet.append([
+            "Review each row below and decide if it needs manual redaction. "
+            "For full per-occurrence detail (not needed for review), see the "
+            "'Residual Flags - Full Detail' tab instead."
+        ])
         summary_sheet.append(["text", "label", "occurrences", "sample_context", "example_locations"])
         for text, label, count, sample_context, examples in _summarise_residual_flags(residual_flags):
             summary_sheet.append([
@@ -324,7 +335,11 @@ def write_output_workbook(destination, df: pd.DataFrame, results_summary: list[d
             ])
 
         residual_columns = ["source_column", "output_column", "row_index", "label", "text", "context"]
-        residual_sheet = wb.create_sheet("Residual Flags")
+        residual_sheet = wb.create_sheet("Residual Flags - Full Detail")
+        residual_sheet.append([
+            "Full per-occurrence detail, for reference only - do NOT review "
+            "row by row. Use the 'Residual Flags - REVIEW HERE' tab instead."
+        ])
         residual_sheet.append(residual_columns)
         for item in residual_flags:
             for finding in item["findings"]:
