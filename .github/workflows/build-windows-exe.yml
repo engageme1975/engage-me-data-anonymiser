@@ -10,6 +10,7 @@ on:
       - "anonymization_core.py"
       - "desktop_app.py"
       - "beyond_recognizers.py"
+      - "uk_road_names.txt"
       - "requirements.txt"
       - "build-windows-exe.ps1"
       - ".github/workflows/build-windows-exe.yml"

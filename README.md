@@ -106,6 +106,16 @@ Fixed with:
 
 Verified directly against real (sanitised) Beyond Housing sample output: 6 of 6 addresses with a recognisable street-type suffix now redact correctly, the one without a suffix is flagged for review, and the tenancy reference number now redacts.
 
+### Addresses with no street suffix (OS Open Names gazetteer)
+The previously accepted gap - a bare "number + word(s)" address with no street-type suffix (e.g. "12 Parkside") is too easily confused with quantities, list items, or dates to match safely with a regex alone - is now partly closed using [OS Open Names](https://www.ordnancesurvey.co.uk/products/os-open-names), Ordnance Survey's free, open GB gazetteer. `uk_road_names.txt` (bundled with the app, ~5.9MB) holds the 372,801 unique "Named Road" entries from that dataset.
+
+- **Multi-word matches auto-redact.** A house number followed by an exact 2-3 word sequence from the gazetteer (e.g. "45 Setters Hill Estate", "3 North Toogs") is redacted automatically - the odds of that exact wording occurring by coincidence in ordinary prose are negligible. This covers 54,851 of the 69,143 no-suffix road names in the dataset.
+- **Single-word matches are flagged, not auto-redacted.** Many single-word road names are also ordinary short English words ("Bank", "Camp", "Glen", "Roadside") - auto-redacting "4 Bank" out of "4 Bank holidays" would be a worse trade than leaving it for review. These surface in the Residual Flags sheet as `POSSIBLE_UK_ADDRESS_GAZETTEER` instead.
+
+Verified against the real 728-row Beyond Housing pilot file: this added only 7 extra residual flags across the whole file (no repeat of the "Tuesday" noise problem), while correctly leaving adversarial phrasing ("10 Bank holidays", "4 Camp sites", "12 Roadside assistance calls") unredacted.
+
+This is street-level only, not house-level - OS Open Names doesn't validate that a specific house number exists on a given road, only that the road name itself is real.
+
 ### Updating to a new version
 Releases are published on the [Releases page](https://github.com/engageme1975/engage-me-data-anonymiser/releases) as `Engage-Me-Data-Anonymiser-windows.zip`, tagged with a version (e.g. `v1.1.0`). The app's title bar shows its version, so you can confirm which build is running without checking file dates.
 
