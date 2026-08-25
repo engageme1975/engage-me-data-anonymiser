@@ -29,6 +29,7 @@ REDACTABLE_ENTITY_TYPES = {
     "HOUSING_REF",
     "ACCESS_CODE",
     "UK_ADDRESS",
+    "LOCATION",
 }
 
 # Generic role/status words that spaCy's NER occasionally misclassifies as
@@ -98,14 +99,11 @@ ADDRESS_LABEL_PATTERN = r"(?<=Address: )[^\r\n]+"
 
 # UK street address (house number + street name + a common street-type
 # suffix), e.g. "33 Waveney Rd", "44 Greenland Avenue", "7 The Green",
-# "34 herbert drive". Found via real Beyond Housing sample output: full
-# street addresses were passing through completely unredacted, since
-# UK_POSTCODE only matches the postcode itself and spaCy's LOCATION/GPE
-# recall on informal address prose is unreliable (same known weak spot as
-# PERSON - see beyond_recognizers module docs). Requires a recognisable
-# street-type word since a bare "number + capitalised word" (e.g. "12
-# Parkside", which has no suffix) is too easily confused with quantities,
-# list items, or dates to match safely without one.
+# "34 herbert drive". Clients using this for repair-comment analysis are
+# happy to over-redact addresses, so recall beats precision here. A
+# second, broader pattern below also catches unsuffixed names such as
+# "12 Parkside". Dates and quantity phrases are carved out so repair
+# timelines survive ("15 May 2023", "3 days later", "2 hour visit").
 UK_STREET_SUFFIXES = (
     r"Road|Rd|Street|St|Avenue|Ave|Drive|Dr|Court|Ct|Close|Lane|Ln|Way|"
     r"Green|Rise|Gardens|Grove|Crescent|Cres|Place|Pl|Terrace|Walk|Row|"
@@ -235,6 +233,32 @@ class UkGazetteerAddressRecognizer(EntityRecognizer):
         return results
 
 
+# NOTE: an earlier version of this address work also had
+# HOUSE_NUMBER_NAME_PATTERN (house number + Title-Case word(s), no suffix
+# required) and PREPOSITION_ADDRESS_PATTERNS ("of/at/from <number>
+# <word(s)>"), meant to close the same no-suffix gap as
+# UkGazetteerAddressRecognizer above via a broad regex instead of a real
+# gazetteer lookup. Both were removed after adversarial testing:
+# HOUSE_NUMBER_NAME_PATTERN's own global_regex_flags=re.IGNORECASE silently
+# defeated its [A-Z] Title-Case gate (IGNORECASE makes [A-Z] match lowercase
+# too), so it matched almost any "number + a few words" - e.g. "10 Bank
+# holidays fall" got redacted whole. Even re-tested case-sensitively, it
+# still false-positived on every adversarial case ("3 Court dates", "2 New
+# Builds", "5 Working Days") - real housing-complaint text capitalises
+# non-name words constantly (numbered list items, emphasis), so Title-Case
+# alone isn't a safe signal in this domain. PREPOSITION_ADDRESS_PATTERNS
+# used a deliberately case-insensitive core and failed independently of the
+# IGNORECASE bug ("at 3 Different Times", "of 4 Similar Properties").
+
+FLAT_BUILDING_PATTERN = (
+    r"\b(?:flat|apartment|unit|apt)\.?[ ]+\d+[A-Za-z]?"
+    r"(?:[ ]*[,/][ ]*\d+[A-Za-z]?)?"
+    r"(?:[ ,]+(?:[A-Z][A-Za-z'’-]*[ ]*){1,4}"
+    r"(?:House|Court|Tower|Lodge|Mansions|Apartments|Building|Block|"
+    r"Place|Residences|Hall))?"
+    r"\b"
+)
+
 # UK title + name, used in free-flowing complaint prose (e.g. "Miss Cole
 # received a letter", "Mr & Mrs Judge of 8 Waterlow Road"). spaCy's NER
 # inconsistently detects these short informal mentions, and in at least one
@@ -249,6 +273,57 @@ TITLE_NAME_PATTERN = (
 )
 
 
+
+
+
+class PostcodeAnchoredAddressRecognizer(EntityRecognizer):
+    """
+    When a UK postcode is present, redact backwards to the first house
+    number / flat token in the same clause. Repair comments often have
+    "7 The Green, South Creake, Fakenham NR21 1AA" - the street matcher
+    would leave the towns. Over-redaction of that whole block is intended.
+    """
+
+    def __init__(self):
+        super().__init__(
+            supported_entities=["UK_ADDRESS"],
+            name="Beyond Postcode-Anchored Address",
+            supported_language="en",
+        )
+        self._postcode = re.compile(UK_POSTCODE_PATTERN, re.IGNORECASE)
+        self._start_token = re.compile(
+            r"\b(?:flat|apartment|unit|apt|no\.?|number)?\s*\d+[A-Za-z]?\b",
+            re.IGNORECASE,
+        )
+
+    def analyze(self, text, entities, nlp_artifacts=None):
+        if entities and "UK_ADDRESS" not in entities:
+            return []
+        results = []
+        for match in self._postcode.finditer(text):
+            postcode_start, postcode_end = match.start(), match.end()
+            window_start = max(0, postcode_start - 120)
+            prefix = text[window_start:postcode_start]
+            boundary = max(prefix.rfind("."), prefix.rfind("\n"), prefix.rfind(";"))
+            candidate_start = window_start + boundary + 1 if boundary >= 0 else window_start
+            candidate = text[candidate_start:postcode_end]
+            if not re.search(
+                rf"\b(\d+[A-Za-z]?|flat\s+\d+|apartment\s+\d+|{UK_STREET_SUFFIXES})\b",
+                candidate,
+                re.IGNORECASE,
+            ):
+                continue
+            first = self._start_token.search(candidate)
+            start = candidate_start + first.start() if first else candidate_start
+            results.append(
+                RecognizerResult(
+                    entity_type="UK_ADDRESS",
+                    start=start,
+                    end=postcode_end,
+                    score=0.90,
+                )
+            )
+        return results
 
 
 def create_beyond_analyzer(score_threshold: float = 0.4) -> AnalyzerEngine:
@@ -346,7 +421,10 @@ def create_beyond_analyzer(score_threshold: float = 0.4) -> AnalyzerEngine:
     street_address_recognizer = PatternRecognizer(
         supported_entity="UK_ADDRESS",
         name="Beyond UK Street Address",
-        patterns=[Pattern("Street address", UK_STREET_ADDRESS_PATTERN, 0.75)],
+        patterns=[
+            Pattern("Street address", UK_STREET_ADDRESS_PATTERN, 0.75),
+            Pattern("Flat / building", FLAT_BUILDING_PATTERN, 0.72),
+        ],
         context=[
             "address", "property", "flat", "house", "street", "road",
             "lane", "avenue", "moved", "tenant of", "tenancy",
@@ -413,6 +491,7 @@ def create_beyond_analyzer(score_threshold: float = 0.4) -> AnalyzerEngine:
     registry.add_recognizer(street_address_recognizer)
     registry.add_recognizer(address_label_recognizer)
     registry.add_recognizer(gazetteer_address_recognizer)
+    registry.add_recognizer(PostcodeAnchoredAddressRecognizer())
 
     analyzer = AnalyzerEngine(
         registry=registry,
@@ -448,6 +527,7 @@ def residual_scan(text: str) -> List[Dict[str, Any]]:
         (UK_NINO_PATTERN, "POSSIBLE_NINO"),
         (r"\b\d{8,}\b", "LONG_DIGIT_SEQUENCE"),
         (UK_STREET_ADDRESS_PATTERN, "POSSIBLE_UK_ADDRESS"),
+        (FLAT_BUILDING_PATTERN, "POSSIBLE_UK_ADDRESS"),
         (ADDRESS_LABEL_PATTERN, "POSSIBLE_ADDRESS_LABEL"),
     ]
 
