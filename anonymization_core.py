@@ -290,6 +290,23 @@ def write_output_workbook(destination, df: pd.DataFrame, results_summary: list[d
         detection_sheet.append([_excel_safe(item.get(column)) for column in detection_columns])
 
     if residual_flags:
+        # The same flagged value (e.g. a missed surname) typically recurs
+        # across many rows in a large file - at 100k rows that's tens of
+        # thousands of near-duplicate flag rows, which nobody actually
+        # reviews row by row. This groups by (label, text) so "Munday"
+        # appearing 200 times is one reviewable line, not 200, with a
+        # sample of where to look if someone wants to check context.
+        # Placed before the full per-row sheet, not instead of it.
+        summary_sheet = wb.create_sheet("Residual Flags Summary")
+        summary_sheet.append(["text", "label", "occurrences", "example_locations"])
+        for text, label, count, examples in _summarise_residual_flags(residual_flags):
+            summary_sheet.append([
+                _excel_safe(text),
+                _excel_safe(label),
+                _excel_safe(count),
+                _excel_safe(examples),
+            ])
+
         residual_columns = ["source_column", "output_column", "row_index", "label", "text"]
         residual_sheet = wb.create_sheet("Residual Flags")
         residual_sheet.append(residual_columns)
@@ -304,3 +321,34 @@ def write_output_workbook(destination, df: pd.DataFrame, results_summary: list[d
                 ])
 
     wb.save(destination)
+
+
+def _summarise_residual_flags(
+    residual_flags: list[dict], max_examples: int = 3
+) -> list[tuple[str, str, int, str]]:
+    """
+    Groups residual flags by (text, label) and returns one row per unique
+    combination, most frequent first, with a small sample of where each
+    one occurs. Frequency-first ordering surfaces the highest-volume
+    items (most likely either a real recurring leak or common review-
+    sheet noise) at the top rather than requiring a scroll through
+    thousands of rows in file order to notice a pattern.
+    """
+    groups: dict[tuple[str, str], dict] = {}
+    for item in residual_flags:
+        for finding in item["findings"]:
+            key = (finding["text"], finding["label"])
+            group = groups.setdefault(key, {"count": 0, "examples": []})
+            group["count"] += 1
+            if len(group["examples"]) < max_examples:
+                group["examples"].append(f"{item['source_column']} row {item['row_index']}")
+
+    rows = []
+    for (text, label), group in groups.items():
+        examples = ", ".join(group["examples"])
+        if group["count"] > len(group["examples"]):
+            examples += f", +{group['count'] - len(group['examples'])} more"
+        rows.append((text, label, group["count"], examples))
+
+    rows.sort(key=lambda row: row[2], reverse=True)
+    return rows

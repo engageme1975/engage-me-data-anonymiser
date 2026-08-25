@@ -29,14 +29,22 @@ REDACTABLE_ENTITY_TYPES = {
 
 # Generic role/status words that spaCy's NER occasionally misclassifies as
 # PERSON in UK social-housing text. Passed to AnalyzerEngine.analyze() as an
-# allow_list so they're never redacted, regardless of which recognizer or
-# entity type flagged them.
+# allow_list so they're never redacted, and also passed into
+# scan_missed_proper_nouns (beyond_recognizers.py) so the same words don't
+# flood the Residual Flags sheet as false-positive "possible missed name"
+# noise - in a 12k-row test, "Tuesday" alone accounted for 1,796 of 2,785
+# residual flags (64%), all false positives. Day names are unambiguous
+# (nobody is named "Tuesday"); month names are deliberately NOT included
+# here even though some showed up in the same testing, since several
+# (May, April, June, August) are genuine common English first names and
+# blanket-suppressing them would cost real recall, not just cut noise.
 PERSON_FALSE_POSITIVE_ALLOW_LIST = [
     "Landlord", "Landlords", "Landlady", "Landladies",
     "Tenant", "Tenants", "Workman", "Workmen",
     "Contractor", "Contractors", "Occupant", "Occupants",
     "Resident", "Residents", "Neighbour", "Neighbours",
     "Multiple", "Mutliple",
+    "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday",
 ]
 
 
