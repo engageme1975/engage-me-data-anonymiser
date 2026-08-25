@@ -10,3 +10,6 @@ dist/
 *.spec
 *.log
 .venv/
+# Experimental ONNX PERSON model weights (~108MB) - fetched at build/setup
+# time by fetch_onnx_person_model.py, not committed to git.
+models/

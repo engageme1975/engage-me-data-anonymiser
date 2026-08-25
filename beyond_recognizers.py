@@ -135,13 +135,23 @@ TITLE_NAME_PATTERN = (
 
 
 
-def create_beyond_analyzer(score_threshold: float = 0.4) -> AnalyzerEngine:
+def create_beyond_analyzer(
+    score_threshold: float = 0.4, enable_onnx_person: bool = False
+) -> AnalyzerEngine:
     """
     Creates a ready-to-use AnalyzerEngine with:
     - All standard + UK recognizers
     - Strong custom UK postcode, NINO and phone patterns
     - Domain-specific housing references
     - Context-boosted key-safe / access codes
+
+    enable_onnx_person: experimental, off by default - adds
+    OnnxPersonRecognizer (see onnx_person_recognizer.py) as an extra PERSON
+    pass to evaluate its recall/cost trade-off against spaCy alone. Not
+    recommended for production use as-is: it's a strict addition to runtime
+    (spaCy is still required for every other entity type), not a
+    replacement, and measurably slower than the rest of the pipeline
+    combined - see the module docstring for the numbers.
     """
 
     nlp_configuration = {
@@ -294,6 +304,17 @@ def create_beyond_analyzer(score_threshold: float = 0.4) -> AnalyzerEngine:
     registry.add_recognizer(title_name_recognizer)
     registry.add_recognizer(street_address_recognizer)
     registry.add_recognizer(address_label_recognizer)
+
+    if enable_onnx_person:
+        from onnx_person_recognizer import OnnxPersonRecognizer
+
+        onnx_person_recognizer = OnnxPersonRecognizer()
+        # RecognizerRegistry.add_recognizer() does not call .load() itself -
+        # without this, the model silently never loads and analyze() is a
+        # permanent no-op (caught via a direct _session-is-None check after
+        # first wiring this in - Presidio doesn't raise or warn either way).
+        onnx_person_recognizer.load()
+        registry.add_recognizer(onnx_person_recognizer)
 
     analyzer = AnalyzerEngine(
         registry=registry,
