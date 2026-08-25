@@ -1,0 +1,8 @@
+# Optional, only needed to evaluate the experimental ONNX PERSON recognizer
+# (onnx_person_recognizer.py, enable_onnx_person=True). NOT part of the
+# default install - the shipped app (Docker image, Windows EXE) does not
+# require these. Verified to pull in zero torch/transformers as transitive
+# dependencies.
+onnxruntime
+tokenizers
+huggingface_hub
