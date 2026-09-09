@@ -54,6 +54,13 @@ Push the repo to GitHub and run the workflow **Build Windows EXE**.
 
 It produces a downloadable ZIP artifact containing the Windows build. **Rebuild and redistribute the EXE after performance / residual-name changes so testers (e.g. Dylan) are not still running an older freeze-prone binary.**
 
+### No-network smoke test (why the build script can take a moment longer)
+After packaging, `build-windows-exe.ps1` runs the actual built EXE once with outbound network blocked (a temporary Windows Firewall rule scoped to that one EXE, removed immediately after) and confirms it can still complete a real anonymisation job.
+
+This exists because of a real incident: `presidio-analyzer`'s `EmailRecognizer` depends on `tldextract`, which needs a public-suffix-list data file and falls back to an offline snapshot bundled inside its own package when it can't reach the internet. PyInstaller doesn't know to bundle that snapshot unless told to explicitly - and because the machine building and testing the EXE normally *has* internet access, `tldextract` silently fetched a live copy instead, completely masking the gap. It only failed on a tester's machine that couldn't reach the internet, well after release, and looked identical to a generic crash regardless of file size. Fixed by adding `--collect-data tldextract` to the PyInstaller command - the smoke test exists so any *other* dependency with the same "needs a bundled fallback file, but only when offline" pattern gets caught automatically before it ships, not manually audited dependency-by-dependency after the fact.
+
+If the smoke test fails, the build script throws with the exit code and a pointer to add `--collect-data <package>` for whatever's missing. If it can't get admin rights to add the firewall rule (needed to actually block outbound traffic), it prints a warning and skips the check rather than blocking the build - re-run as Administrator to get real coverage before a release.
+
 ## Performance (large datasets)
 The desktop app and core pipeline are designed for multi-thousand-row files:
 
