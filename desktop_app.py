@@ -19,7 +19,7 @@ from anonymization_core import (
     write_output_workbook,
 )
 
-APP_VERSION = "1.3.1"
+APP_VERSION = "1.3.2"
 LARGE_FILE_ROW_WARNING = 3000
 
 
@@ -419,4 +419,27 @@ if __name__ == "__main__":
     import multiprocessing
 
     multiprocessing.freeze_support()
-    main()
+
+    import os
+
+    if os.environ.get("ANONYMISER_HEADLESS_TEST"):
+        # Not part of the normal app UI - lets build-windows-exe.ps1 run a
+        # real anonymisation job through the actual frozen EXE as a smoke
+        # test (see the no-network check there). Added after a real crash
+        # (missing tldextract offline data file) that only manifested on a
+        # machine without network access to the fallback tldextract was
+        # silently using during local testing - this is what would have
+        # caught it before it shipped.
+        in_path = os.environ["ANONYMISER_HEADLESS_TEST"]
+        out_path = os.environ.get("ANONYMISER_HEADLESS_OUT", "headless_test_output.xlsx")
+        columns = os.environ.get("ANONYMISER_HEADLESS_COLUMNS", "").split(",")
+        df = load_dataframe(in_path)
+        print(f"Loaded {len(df)} rows from {in_path}")
+        selected = sorted(DEFAULT_ENTITY_TYPES)
+        out_df, results_summary, residual_flags, stats = process_dataframe(
+            df, columns, selected, "Generic <REDACTED> (recommended)", 0.45,
+        )
+        write_output_workbook(out_path, out_df, results_summary, residual_flags)
+        print(f"SUCCESS: {stats['pii_entities_detected']} entities detected, output at {out_path}")
+    else:
+        main()

@@ -105,6 +105,7 @@ Write-Host "Building Windows executable..."
     --collect-all thinc `
     --collect-all presidio_analyzer `
     --collect-all presidio_anonymizer `
+    --collect-data tldextract `
     --exclude-module pyarrow `
     --exclude-module PIL `
     --exclude-module streamlit `
@@ -116,3 +117,53 @@ Write-Host "Building Windows executable..."
 Remove-Item -Force $versionFilePath -ErrorAction SilentlyContinue
 
 Write-Host "Build complete ($appVersion). Find the executable in dist\$OutputName\$OutputName.exe"
+
+# No-network smoke test - runs the actual built EXE with outbound network
+# blocked and confirms it still completes a real anonymisation job. This
+# exists because of a real incident: tldextract (a presidio-analyzer
+# dependency, used by its EmailRecognizer) needs a public-suffix-list data
+# file, and falls back to an offline snapshot bundled inside the tldextract
+# package when it can't reach the internet. PyInstaller's import-following
+# analysis doesn't know to bundle that snapshot unless told to explicitly
+# (--collect-data tldextract above) - and because the machine building and
+# testing the EXE usually HAS internet access, tldextract silently fetched
+# a live copy instead, completely masking the missing file. It only failed
+# on a machine that couldn't reach the internet, days after release. Any
+# other dependency with the same "needs a bundled fallback file, but only
+# when offline" pattern would be invisible the same way without this check.
+Write-Host "Running no-network smoke test..."
+$exePath = "dist\$OutputName\$OutputName.exe"
+$smokeTestCsv = [System.IO.Path]::GetTempFileName() + ".csv"
+$smokeTestOut = [System.IO.Path]::GetTempFileName() + ".xlsx"
+@"
+Summary
+"Please contact John Smith at john.smith@example.co.uk about the repair."
+"@ | Out-File -FilePath $smokeTestCsv -Encoding utf8
+
+$firewallRuleName = "EngageMe-Build-Smoke-Test-Block-$([guid]::NewGuid().ToString().Substring(0,8))"
+$firewallRuleAdded = $false
+try {
+    New-NetFirewallRule -DisplayName $firewallRuleName -Direction Outbound -Program (Resolve-Path $exePath) -Action Block -Profile Any -ErrorAction Stop | Out-Null
+    $firewallRuleAdded = $true
+} catch {
+    Write-Host "WARNING: could not add a firewall rule (needs admin rights) - skipping the no-network smoke test. Run this script as Administrator to get real offline-mode coverage before release." -ForegroundColor Yellow
+}
+
+if ($firewallRuleAdded) {
+    try {
+        $env:ANONYMISER_HEADLESS_TEST = $smokeTestCsv
+        $env:ANONYMISER_HEADLESS_OUT = $smokeTestOut
+        $env:ANONYMISER_HEADLESS_COLUMNS = "Summary"
+        & $exePath
+        $smokeExitCode = $LASTEXITCODE
+        if ($smokeExitCode -ne 0) {
+            throw "No-network smoke test failed (exit code $smokeExitCode) - the built EXE cannot complete a run without internet access. This usually means a dependency needs a bundled data file that PyInstaller didn't include - check the output above for which package/file, then add --collect-data <package> above."
+        }
+        Write-Host "No-network smoke test passed - the EXE completes a real run with no internet access."
+    } finally {
+        Remove-NetFirewallRule -DisplayName $firewallRuleName -ErrorAction SilentlyContinue
+        Remove-Item Env:\ANONYMISER_HEADLESS_TEST, Env:\ANONYMISER_HEADLESS_OUT, Env:\ANONYMISER_HEADLESS_COLUMNS -ErrorAction SilentlyContinue
+    }
+}
+
+Remove-Item -Force $smokeTestCsv, $smokeTestOut -ErrorAction SilentlyContinue
